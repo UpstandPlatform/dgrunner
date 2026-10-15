@@ -55,5 +55,8 @@ jobs:
       - name: Verify CLI version matches package
         run: node scripts/verify-package-version.mjs
 
+      - name: Validate agent skills
+        run: npm run check:skills
+
       - name: Validate package contents
         run: npm pack --dry-run --ignore-scripts

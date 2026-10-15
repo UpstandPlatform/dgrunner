@@ -2,6 +2,8 @@
 
 > **Transform any PC + Docker into a hardened, persistent self-hosted GitHub Actions runner with pre-flight security validation, service management, and automated test workflows.**
 
+[![skills.sh](https://skills.sh/b/UpstandPlatform/dgrunner)](https://skills.sh/UpstandPlatform/dgrunner)
+
 Built with TypeScript and [Commander](https://www.npmjs.com/package/commander).
 
 ---
@@ -15,6 +17,7 @@ Built with TypeScript and [Commander](https://www.npmjs.com/package/commander).
   - [Global Install (Recommended)](#1-global-installation-recommended)
   - [Zero-Install via npx](#2-zero-install-via-npx)
   - [Install from Source](#3-install-from-source)
+- [Agent Skills](#-agent-skills)
 - [Quick Start Guide](#-quick-start-guide)
 - [CLI Command Reference](#-cli-command-reference)
   - [`dgrunner doctor`](#dgrunner-doctor)
@@ -36,6 +39,32 @@ Built with TypeScript and [Commander](https://www.npmjs.com/package/commander).
 - [CI/CD & npm Trusted Publishing](#-cicd--npm-trusted-publishing)
 - [Development & Testing](#-development--testing)
 - [License](#-license)
+
+---
+
+## 🤖 Agent Skills
+
+The repository includes installable skills that teach agentic coding tools how to set up, operate, and troubleshoot `dgrunner`. Skills are compatible with Claude Code, Codex, and other agents supported by the skills CLI.
+
+List the available skills:
+
+```bash
+npx skills add UpstandPlatform/dgrunner --list
+```
+
+Install all dgrunner skills for all supported agents:
+
+```bash
+npx skills add UpstandPlatform/dgrunner --all
+```
+
+Or install the skills for Claude Code and Codex:
+
+```bash
+npx skills add UpstandPlatform/dgrunner --skill dgrunner-setup dgrunner-operations dgrunner-troubleshooting --agent claude-code codex
+```
+
+The skill definitions are also included in the npm package under `skills/`. Skills.sh installs them from this public GitHub repository with its CLI; npm installation of `@upstand/dgrunner` remains a separate step for the runner command itself.
 
 ---
 

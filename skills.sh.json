@@ -1,0 +1,21 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "notGrouped": "bottom",
+  "groupings": [
+    {
+      "title": "Setup & Operations",
+      "description": "Install, configure, and manage dgrunner self-hosted runners.",
+      "skills": [
+        "dgrunner-setup",
+        "dgrunner-operations"
+      ]
+    },
+    {
+      "title": "Troubleshooting",
+      "description": "Diagnose runner startup, job placement, and work-directory failures.",
+      "skills": [
+        "dgrunner-troubleshooting"
+      ]
+    }
+  ]
+}

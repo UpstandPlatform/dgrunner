@@ -1,6 +1,6 @@
 {
   "name": "@upstand/dgrunner",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Clean, minimal, and secure self-hosted GitHub Actions runner CLI with Docker integration",
   "type": "module",
   "main": "./dist/index.js",
@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "skills",
     "README.md",
     "LICENSE"
   ],
@@ -17,6 +18,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "check:skills": "node scripts/verify-skills.mjs",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -41,6 +43,10 @@
     "ci-cd",
     "security",
     "automation",
+    "agent-skills",
+    "skills.sh",
+    "claude-code",
+    "codex",
     "upstand"
   ],
   "author": "Upstand Team",
