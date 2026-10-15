@@ -1,24 +1,53 @@
 import { Command } from "commander";
-import { startService, stopService, getRunnerStatus } from "../core/runner-manager.js";
+import pc from "picocolors";
+import {
+  startService,
+  stopService,
+  runForeground,
+  listRunnerProcesses,
+  tailRunnerLogs,
+} from "../core/runner-manager.js";
 import { logger } from "../utils/logger.js";
 import { DEFAULT_RUNNER_DIR } from "../config/constants.js";
 
 export function registerServiceCommands(program: Command): void {
+  // dgrunner start [--attach]
   program
     .command("start")
-    .description("Start the persistent runner background service")
+    .description("Start the persistent runner background service or run attached")
     .option("-d, --dir <path>", "Runner directory", DEFAULT_RUNNER_DIR)
+    .option("-a, --attach", "Run in foreground and stay attached listening for jobs", false)
     .action(async (options) => {
-      logger.info("Starting runner service...");
-      const res = await startService(options.dir);
-      if (res.success) {
-        logger.success(res.message);
+      if (options.attach) {
+        logger.info("Starting runner in foreground attached mode (Press Ctrl+C to stop)...");
+        const exitCode = await runForeground(options.dir);
+        process.exit(exitCode);
       } else {
-        logger.error(res.message);
-        process.exit(1);
+        logger.info("Starting runner service in background...");
+        const res = await startService(options.dir);
+        if (res.success) {
+          logger.success(res.message);
+          console.log(pc.dim("  Tip: View live logs with: ") + pc.cyan("dgrunner logs --follow"));
+          console.log(pc.dim("  Tip: Or run attached with: ") + pc.cyan("dgrunner run"));
+        } else {
+          logger.error(res.message);
+          process.exit(1);
+        }
       }
     });
 
+  // dgrunner run (attached shortcut)
+  program
+    .command("run")
+    .description("Start the runner attached in foreground and stream live job logs")
+    .option("-d, --dir <path>", "Runner directory", DEFAULT_RUNNER_DIR)
+    .action(async (options) => {
+      logger.info("Starting runner in foreground attached mode (Press Ctrl+C to stop)...");
+      const exitCode = await runForeground(options.dir);
+      process.exit(exitCode);
+    });
+
+  // dgrunner stop
   program
     .command("stop")
     .description("Stop the persistent runner background service")
@@ -34,6 +63,7 @@ export function registerServiceCommands(program: Command): void {
       }
     });
 
+  // dgrunner restart
   program
     .command("restart")
     .description("Restart the persistent runner background service")
@@ -48,5 +78,55 @@ export function registerServiceCommands(program: Command): void {
         logger.error(res.message);
         process.exit(1);
       }
+    });
+
+  // dgrunner ps (list running processes)
+  program
+    .command("ps")
+    .alias("list")
+    .description("List active runner processes managed by dgrunner")
+    .option("-d, --dir <path>", "Runner directory", DEFAULT_RUNNER_DIR)
+    .action(async (options) => {
+      logger.header("Active dgrunner Processes");
+      const procs = await listRunnerProcesses(options.dir);
+
+      if (procs.length === 0) {
+        console.log(pc.yellow("  No active runner processes currently running."));
+        console.log(pc.dim("  Start one with: ") + pc.cyan("dgrunner start") + pc.dim(" or ") + pc.cyan("dgrunner run\n"));
+        return;
+      }
+
+      console.log(
+        pc.bold(
+          `${"PID".padEnd(8)} ${"PROCESS".padEnd(18)} ${"RUNNER NAME".padEnd(20)} ${"MEMORY".padEnd(10)} ${"STATUS".padEnd(12)} TARGET`
+        )
+      );
+      console.log(pc.dim("─".repeat(85)));
+
+      for (const p of procs) {
+        const pidStr = String(p.pid).padEnd(8);
+        const nameStr = p.name.padEnd(18);
+        const runnerStr = (p.runnerName || "dgrunner").padEnd(20);
+        const memStr = (p.memoryMb ? `${p.memoryMb} MB` : "N/A").padEnd(10);
+        const statusStr = pc.green(p.status.padEnd(12));
+        const urlStr = pc.cyan(p.targetUrl || "N/A");
+        console.log(`${pidStr} ${nameStr} ${runnerStr} ${memStr} ${statusStr} ${urlStr}`);
+      }
+      console.log();
+    });
+
+  // dgrunner logs [--follow] [--lines <n>]
+  program
+    .command("logs")
+    .alias("attach")
+    .description("View or follow real-time logs of the background runner")
+    .option("-f, --follow", "Follow live log output continuously", false)
+    .option("-n, --lines <count>", "Number of initial lines to display", "50")
+    .action(async (options) => {
+      logger.header("dgrunner Background Service Logs");
+      await tailRunnerLogs({
+        follow: options.follow,
+        lines: parseInt(options.lines, 10) || 50,
+      });
     });
 }

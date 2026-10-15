@@ -273,11 +273,59 @@ Manages the lifecycle of the persistent runner daemon:
 # Start the runner service in the background
 dgrunner start
 
+# Start and stay attached in foreground
+dgrunner start --attach
+
 # Gracefully stop the runner service
 dgrunner stop
 
 # Restart the runner service
 dgrunner restart
+```
+
+---
+
+### `dgrunner run` (Foreground Attached Mode)
+Direct shortcut to start the runner in the foreground and stream live GitHub Actions job outputs directly to your terminal:
+
+```bash
+dgrunner run
+```
+
+Press `Ctrl+C` to cleanly detach and stop.
+
+---
+
+### `dgrunner ps` / `list` (Active Process Inspector)
+Lists all active GitHub Actions runner processes managed by `dgrunner` with PID, memory consumption, status, and target repository:
+
+```bash
+dgrunner ps
+```
+
+**Sample Output:**
+```text
+=== Active dgrunner Processes ===
+
+PID      PROCESS            RUNNER NAME          MEMORY     STATUS       TARGET
+─────────────────────────────────────────────────────────────────────────────────────
+29892    Runner.Listener    dordoone-runner      84 MB      Listening    https://github.com/mhbdev/dordoone
+```
+
+---
+
+### `dgrunner logs` / `attach` (Live Log Streaming)
+Views and streams real-time console logs from the running background runner service:
+
+```bash
+# View last 50 lines of logs
+dgrunner logs
+
+# Follow logs in real-time (live stream)
+dgrunner logs --follow
+
+# View last 100 lines and follow
+dgrunner logs -n 100 -f
 ```
 
 ---

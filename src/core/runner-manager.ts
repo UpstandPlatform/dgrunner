@@ -420,3 +420,169 @@ async function isPidAlive(pid: number): Promise<boolean> {
     return false;
   }
 }
+
+export interface ActiveProcessInfo {
+  pid: number;
+  name: string;
+  runnerName?: string;
+  targetUrl?: string;
+  memoryMb?: number;
+  status: string;
+}
+
+/**
+ * Runs the runner attached in the foreground, streaming stdout/stderr in real time.
+ */
+export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<number> {
+  await ensureRunnerEnvironment(runnerDir);
+
+  const { spawn } = await import("node:child_process");
+
+  let execFile = "";
+  let execArgs: string[] = [];
+  const env = { ...process.env };
+
+  if (process.platform === "win32") {
+    const gitBin = await resolveGitBashDir();
+    if (gitBin) {
+      env.PATH = `${gitBin};${env.PATH || ""}`;
+    }
+    const listenerExe = path.join(runnerDir, "bin", "Runner.Listener.exe");
+    if (fs.existsSync(listenerExe)) {
+      execFile = listenerExe;
+      execArgs = ["run"];
+    } else {
+      execFile = "cmd.exe";
+      execArgs = ["/c", path.join(runnerDir, "run.cmd")];
+    }
+  } else {
+    execFile = path.join(runnerDir, "run.sh");
+    execArgs = [];
+  }
+
+  return new Promise((resolve) => {
+    const child = spawn(execFile, execArgs, {
+      cwd: runnerDir,
+      stdio: "inherit",
+      env,
+    });
+
+    const cleanup = () => {
+      try {
+        child.kill("SIGINT");
+      } catch {}
+    };
+
+    process.on("SIGINT", cleanup);
+    process.on("SIGTERM", cleanup);
+
+    child.on("close", (code) => {
+      process.off("SIGINT", cleanup);
+      process.off("SIGTERM", cleanup);
+      resolve(code ?? 0);
+    });
+  });
+}
+
+/**
+ * Lists active runner processes on the host.
+ */
+export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promise<ActiveProcessInfo[]> {
+  const officialConfig = await readOfficialRunnerConfig(runnerDir);
+  const localMeta = await readLocalMetadata();
+  const runnerName = officialConfig?.runnerName || localMeta?.name || "dgrunner";
+  const targetUrl = officialConfig?.serverUrl || localMeta?.url || "Unknown";
+
+  const results: ActiveProcessInfo[] = [];
+
+  if (process.platform === "win32") {
+    const psCmd = `Get-Process -Name 'Runner.Listener' -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, WorkingSet64 | ConvertTo-Json -Compress`;
+    const res = await execCommand("powershell.exe", ["-NoProfile", "-Command", psCmd]);
+    if (res.exitCode === 0 && res.stdout.trim()) {
+      try {
+        const parsed = JSON.parse(res.stdout);
+        const list = Array.isArray(parsed) ? parsed : [parsed];
+        for (const item of list) {
+          if (item && item.Id) {
+            results.push({
+              pid: item.Id,
+              name: item.ProcessName || "Runner.Listener",
+              runnerName,
+              targetUrl,
+              memoryMb: item.WorkingSet64 ? Math.round(item.WorkingSet64 / (1024 * 1024)) : undefined,
+              status: "Listening",
+            });
+          }
+        }
+      } catch {}
+    }
+  } else {
+    // Linux
+    const res = await execCommand("pgrep", ["-a", "Runner.Listener"]);
+    if (res.exitCode === 0 && res.stdout.trim()) {
+      const lines = res.stdout.split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parseInt(parts[0], 10);
+        if (!isNaN(pid)) {
+          results.push({
+            pid,
+            name: parts[1] || "Runner.Listener",
+            runnerName,
+            targetUrl,
+            status: "Listening",
+          });
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Follows/tails runner log output.
+ */
+export async function tailRunnerLogs(options: { follow?: boolean; lines?: number; baseDir?: string } = {}): Promise<void> {
+  const baseDir = options.baseDir || DEFAULT_BASE_DIR;
+  const logFile = path.join(baseDir, "runner-stdout.log");
+
+  if (!fs.existsSync(logFile)) {
+    console.log("No runner log file found at " + logFile);
+    return;
+  }
+
+  const linesCount = options.lines || 50;
+  const content = await fsPromises.readFile(logFile, "utf-8");
+  const allLines = content.split(/\r?\n/);
+  const tailLines = allLines.slice(-linesCount);
+  for (const line of tailLines) {
+    console.log(line);
+  }
+
+  if (options.follow) {
+    console.log("\n--- Following live logs (Press Ctrl+C to detach) ---");
+    let currentSize = (await fsPromises.stat(logFile)).size;
+
+    const interval = setInterval(async () => {
+      try {
+        const stats = await fsPromises.stat(logFile);
+        if (stats.size > currentSize) {
+          const stream = fs.createReadStream(logFile, { start: currentSize, end: stats.size });
+          stream.on("data", (chunk) => {
+            process.stdout.write(chunk.toString());
+          });
+          currentSize = stats.size;
+        }
+      } catch {}
+    }, 1000);
+
+    await new Promise<void>((resolve) => {
+      process.on("SIGINT", () => {
+        clearInterval(interval);
+        console.log("\nDetached from runner logs.");
+        resolve();
+      });
+    });
+  }
+}
