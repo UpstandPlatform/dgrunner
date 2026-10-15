@@ -1,5 +1,5 @@
 {
-  "name": "dgrunner",
+  "name": "@upstand/dgrunner",
   "version": "1.0.0",
   "description": "Clean, minimal, and secure self-hosted GitHub Actions runner CLI with Docker integration",
   "type": "module",
@@ -7,14 +7,32 @@
   "bin": {
     "dgrunner": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "node ./dist/index.js"
+    "start": "node ./dist/index.js",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/upstand/dgrunner.git"
+  },
+  "bugs": {
+    "url": "https://github.com/upstand/dgrunner/issues"
+  },
+  "homepage": "https://github.com/upstand/dgrunner#readme",
   "keywords": [
     "github-actions",
     "self-hosted-runner",
@@ -22,9 +40,10 @@
     "docker",
     "ci-cd",
     "security",
-    "automation"
+    "automation",
+    "upstand"
   ],
-  "author": "",
+  "author": "Upstand Team",
   "license": "MIT",
   "dependencies": {
     "@inquirer/prompts": "^7.3.2",

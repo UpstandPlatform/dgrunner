@@ -28,6 +28,7 @@ Built with TypeScript and [Commander](https://www.npmjs.com/package/commander).
   - [Windows: Git Bash vs. WSL bash](#windows-git-bash-vs-wsl-bash)
   - [Linux: Rootless Docker Setup](#linux-rootless-docker-setup)
   - [Handling Session Conflicts](#handling-session-conflicts)
+- [CI/CD & npm Trusted Publishing](#-cicd--npm-trusted-publishing)
 - [Development & Testing](#-development--testing)
 - [License](#-license)
 
@@ -84,64 +85,64 @@ You can install and use `dgrunner` in three ways:
 
 ### 1. Global Installation (Recommended)
 
-Install `dgrunner` globally on your machine using npm:
+Install `@upstand/dgrunner` globally on your machine using npm:
 
 ```bash
-npm install -g dgrunner
+npm install -g @upstand/dgrunner
 ```
 
-Once installed globally, you can invoke the CLI from any terminal directory:
+Once installed globally, the `dgrunner` binary is available across your entire system:
 
 ```bash
 dgrunner --help
 dgrunner doctor
 ```
 
-To update to the latest version:
+To update to the latest release:
 ```bash
-npm update -g dgrunner
+npm update -g @upstand/dgrunner
 ```
 
 To uninstall:
 ```bash
-npm uninstall -g dgrunner
+npm uninstall -g @upstand/dgrunner
 ```
 
 ---
 
 ### 2. Zero-Install via npx
 
-Run the latest release directly without installing it globally:
+Run the latest release directly without a persistent global install:
 
 ```bash
-# Launch interactive wizard
-npx dgrunner
+# Launch interactive setup wizard
+npx @upstand/dgrunner
 
 # Run diagnostics
-npx dgrunner doctor
+npx @upstand/dgrunner doctor
 
 # View integration guide
-npx dgrunner guide
+npx @upstand/dgrunner guide
 ```
 
 ---
 
 ### 3. Install from Source
 
-If you want to contribute, modify, or inspect the codebase locally:
+If you want to contribute, modify, or run the development build locally:
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/mhbdev/dgrunner.git
+# 1. Clone repository
+git clone https://github.com/upstand/dgrunner.git
 cd dgrunner
 
 # 2. Install dependencies
 npm install
 
-# 3. Build the CLI bundle
+# 3. Build bundle
 npm run build
 
-# 4. Link globally (makes 'dgrunner' available in terminal)
+# 4. Link globally (makes 'dgrunner' available in your terminal)
 npm link
 ```
 
@@ -411,6 +412,30 @@ A session for this runner already exists.
 Runner connect error: Error: Conflict. Retrying until reconnected.
 ```
 This is expected behavior from GitHub Actions. The runner will automatically retry and reconnect as soon as GitHub drops the stale session. Alternatively, run `dgrunner restart`.
+
+---
+
+## 🚀 CI/CD & npm Trusted Publishing
+
+`@upstand/dgrunner` comes with pre-configured GitHub Actions workflows implementing **npm Trusted Publishing (OIDC)** and cryptographic package provenance:
+
+- **Continuous Integration ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))**:
+  - Runs on every push and PR across **Ubuntu** and **Windows** on Node.js **18.x, 20.x, and 22.x**.
+  - Enforces strict typechecks, unit tests, bundle builds, and npm package integrity validation (`npm pack --dry-run`).
+
+- **Automated Release & Publishing ([`.github/workflows/release.yml`](.github/workflows/release.yml))**:
+  - Triggers automatically when a new semver git tag is pushed (e.g. `git tag v1.0.1 && git push origin v1.0.1`).
+  - Publishes directly to npm with `--access public --provenance` using OpenID Connect (OIDC) without requiring static secret tokens.
+  - Automatically drafts a GitHub Release with full release notes and binary artifacts.
+
+### Setting up npm Trusted Publisher (OIDC)
+
+To configure npm to publish without static tokens:
+1. Log into your account on [npmjs.com](https://www.npmjs.com).
+2. Go to package `@upstand/dgrunner` (or create it under `@upstand`).
+3. Click **Settings** ➔ **Publishing Access** ➔ **Add Publishing Access** ➔ **GitHub Actions**.
+4. Set the repository name (e.g. `upstand/dgrunner`) and specify the workflow file name (`release.yml`).
+5. Now, pushing any tag (e.g. `v1.0.0`) publishes cryptographically signed packages with provenance to npm automatically!
 
 ---
 
