@@ -18,4 +18,22 @@ describe("Doctor Module", () => {
     const dockerCheck = report.checks.find((c) => c.id === "docker");
     expect(dockerCheck).toBeDefined();
   });
+
+  it("should configure checks appropriately for targetEnv: docker", async () => {
+    const report = await runDoctorChecks({ targetEnv: "docker" });
+    const platformCheck = report.checks.find((c) => c.id === "platform");
+    expect(platformCheck).toBeDefined();
+    expect(platformCheck?.status).toBe("pass");
+    expect(platformCheck?.message).toContain("running Docker Linux runner");
+  });
+
+  it("should configure checks appropriately for targetEnv: windows", async () => {
+    const report = await runDoctorChecks({ targetEnv: "windows" });
+    const platformCheck = report.checks.find((c) => c.id === "platform");
+    expect(platformCheck).toBeDefined();
+    if (process.platform === "win32") {
+      expect(platformCheck?.status).toBe("pass");
+    }
+  });
 });
+

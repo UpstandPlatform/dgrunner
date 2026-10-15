@@ -216,27 +216,58 @@ dgrunner doctor --dir ~/runner  # Check specific installation path
 ---
 
 ### `dgrunner setup`
-Full automated setup or scripted unattended setup via flags:
+Full automated setup or scripted unattended setup via flags.
+
+#### 🌐 Target Runner Environments
+
+When running `dgrunner setup` on Windows, you can choose between:
+
+1. **Windows Native (Host Service)** (Default)
+   - Runs natively on Windows host as a background service or foreground runner.
+   - Ideal for PowerShell scripts, .NET builds, and Windows-specific pipelines.
+2. **Linux Container (via Docker)**
+   - Spins up an authentic Linux runner inside Docker (`ghcr.io/actions/actions-runner:latest`).
+   - Runs genuine Linux/Bash jobs on your Windows machine with automatic restart (`--restart unless-stopped`).
+   - Seamlessly mounts `/var/run/docker.sock` so workflow steps can build and run Docker containers.
+   - Preserves build caches across runs in a dedicated volume (`dgrunner-linux-work`).
+3. **WSL2 Linux Environment**
+   - Runs natively inside Windows Subsystem for Linux (Ubuntu / Debian).
+   - `dgrunner` can automatically transfer setup to your WSL2 distro or guide you step-by-step.
+
+#### 💻 Usage Examples
 
 ```bash
-# Interactive wizard (default when flags are omitted)
+# Interactive wizard (prompts for target environment, repository, and token)
 dgrunner setup
 
-# Scripted / Unattended setup
+# Set up a Linux runner container via Docker on Windows:
+dgrunner setup --os linux
+
+# Unattended Linux Container setup via Docker:
 dgrunner setup \
+  --os linux \
+  --url https://github.com/owner/repo \
+  --token <REGISTRATION_TOKEN> \
+  --name my-pc-linux-docker
+
+# Scripted Windows Native setup:
+dgrunner setup \
+  --os windows \
   --url https://github.com/owner/repo \
   --token <REGISTRATION_TOKEN> \
   --name my-workstation \
-  --labels self-hosted,dgrunner,gpu \
-  --dir ~/.dgrunner/actions-runner
+  --labels self-hosted,dgrunner,gpu
 ```
 
 **Options:**
 - `-u, --url <url>`: Target GitHub repository or organization URL.
 - `-t, --token <token>`: GitHub Actions registration token.
-- `-n, --name <name>`: Custom runner name (defaults to `<hostname>-dgrunner`).
-- `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,gpu`).
+- `-n, --name <name>`: Custom runner name (defaults to `<hostname>-linux-docker` or `<hostname>-dgrunner`).
+- `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,linux,x64,docker`).
 - `-d, --dir <path>`: Runner installation directory (defaults to `~/.dgrunner/actions-runner`).
+- `--os <os>`: Target runner OS: `windows` or `linux` (on Windows, `linux` launches Docker container mode).
+- `--env <env>`: Target environment: `windows`, `docker`, `wsl`, or `native`.
+- `--no-docker-socket`: For Docker mode, do not mount `/var/run/docker.sock` into the container.
 - `--force`: Bypass critical pre-flight failures at your own risk.
 - `--no-service`: Configure without immediately starting the persistent background service.
 
@@ -434,6 +465,31 @@ On Windows, GitHub Actions steps configured with `shell: bash` require **Git Bas
 > 
 > **How dgrunner fixes this automatically:**
 > `dgrunner` automatically discovers your Git Bash directory and writes it to `~/.dgrunner/actions-runner/.path` and the runner process environment. This guarantees that Git Bash is prioritized over WSL bash for all workflow steps.
+
+### WSL2 Setup & Docker Desktop Integration
+
+If you want to run Linux runners on Windows, you have two great options:
+
+1. **Option A: Linux Container via Docker (Zero WSL Config)**:
+   Run directly from your Windows PowerShell or Command Prompt:
+   ```bash
+   dgrunner setup --os linux
+   ```
+   This spins up the official Linux runner container directly on Docker Desktop.
+
+2. **Option B: Native WSL2 Runner**:
+   If you prefer running natively inside your WSL2 distro (e.g. Ubuntu):
+   ```bash
+   # Open WSL
+   wsl
+
+   # Run setup inside WSL
+   npx @upstand/dgrunner setup
+   ```
+   > [!TIP]
+   > If your workflows use Docker steps inside WSL, ensure Docker Desktop WSL integration is toggled on:
+   > **Docker Desktop Settings** ➔ **Resources** ➔ **WSL Integration** ➔ Enable integration for your distro (e.g. `Ubuntu`).
+   > Run `dgrunner doctor` inside WSL to verify your connection.
 
 ### Linux: Rootless Docker Setup
 

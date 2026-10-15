@@ -19,6 +19,15 @@ export function registerStatusCommand(program: Command): void {
         `Configured:  ${status.configured ? pc.green("Yes") : pc.yellow("No")}`,
       ];
 
+      if (status.mode === "docker") {
+        statusLines.push(`Environment: ${pc.cyan("Linux Container (Docker)")}`);
+        statusLines.push(`Container:   ${pc.bold(status.containerName || "upstand-dgrunner-linux")}`);
+      } else if (status.mode === "wsl") {
+        statusLines.push(`Environment: ${pc.cyan("WSL2 Linux")}`);
+      } else {
+        statusLines.push(`Environment: ${pc.cyan(process.platform === "win32" ? "Windows Native" : "Linux Native")}`);
+      }
+
       if (status.runnerName) {
         statusLines.push(`Runner Name: ${pc.bold(status.runnerName)}`);
       }
@@ -32,13 +41,19 @@ export function registerStatusCommand(program: Command): void {
       }
 
       const serviceStatus = status.serviceRunning
-        ? pc.green(`Active & Running${status.activePid ? ` (PID: ${status.activePid})` : ""}`)
+        ? pc.green(
+            status.mode === "docker"
+              ? "Active & Running (Docker Container)"
+              : `Active & Running${status.activePid ? ` (PID: ${status.activePid})` : ""}`
+          )
         : status.serviceInstalled
-        ? pc.yellow("Installed, but Stopped")
+        ? pc.yellow(status.mode === "docker" ? "Container Stopped" : "Installed, but Stopped")
         : pc.dim("Not configured");
 
       statusLines.push(`Service:     ${serviceStatus}`);
-      statusLines.push(`Directory:   ${options.dir}`);
+      if (status.mode !== "docker") {
+        statusLines.push(`Directory:   ${options.dir}`);
+      }
 
       const borderColor = status.serviceRunning ? "green" : status.configured ? "yellow" : "red";
       logger.box("RUNNER STATUS", statusLines, borderColor);

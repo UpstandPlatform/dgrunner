@@ -4,6 +4,13 @@ import path from "node:path";
 import os from "node:os";
 import { DEFAULT_BASE_DIR, DEFAULT_RUNNER_DIR } from "../config/constants.js";
 import { execCommand } from "../utils/exec.js";
+import {
+  getDockerRunnerStatus,
+  stopDockerRunner,
+  restartDockerRunner,
+  removeDockerRunner,
+  tailDockerRunnerLogs,
+} from "./docker-runner.js";
 
 export interface RunnerMetadata {
   runnerDir: string;
@@ -14,6 +21,8 @@ export interface RunnerMetadata {
   configuredAt: string;
   os: string;
   arch: string;
+  mode?: "native" | "docker" | "wsl";
+  containerName?: string;
 }
 
 export interface RunnerStatusInfo {
@@ -25,6 +34,8 @@ export interface RunnerStatusInfo {
   serviceInstalled: boolean;
   serviceRunning: boolean;
   activePid?: number;
+  mode?: "native" | "docker" | "wsl";
+  containerName?: string;
 }
 
 export function getRunnerConfigFile(baseDir = DEFAULT_BASE_DIR): string {
@@ -229,6 +240,17 @@ export async function installService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ 
  * Starts the runner persistent service or background process.
  */
 export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
+  const localMeta = await readLocalMetadata();
+  if (localMeta?.mode === "docker") {
+    const res = await restartDockerRunner(localMeta.containerName);
+    return {
+      success: res.success,
+      message: res.success
+        ? `Docker runner container '${localMeta.containerName}' started.`
+        : res.output,
+    };
+  }
+
   if (process.platform === "win32") {
     // Check if run.cmd exists
     const runCmd = path.join(runnerDir, "run.cmd");
@@ -292,6 +314,17 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
  * Stops the runner persistent service or background process.
  */
 export async function stopService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
+  const localMeta = await readLocalMetadata();
+  if (localMeta?.mode === "docker") {
+    const res = await stopDockerRunner(localMeta.containerName);
+    return {
+      success: res.success,
+      message: res.success
+        ? `Docker runner container '${localMeta.containerName}' stopped.`
+        : res.output,
+    };
+  }
+
   if (process.platform === "win32") {
     // Terminate Runner.Listener.exe if active
     await execCommand("taskkill.exe", ["/f", "/im", "Runner.Listener.exe"]).catch(() => {});
@@ -329,6 +362,18 @@ export async function removeRunner(
   runnerDir = DEFAULT_RUNNER_DIR,
   token: string
 ): Promise<{ success: boolean; output: string }> {
+  const localMeta = await readLocalMetadata();
+  if (localMeta?.mode === "docker") {
+    const res = await removeDockerRunner(localMeta.containerName);
+    const metaFile = getRunnerConfigFile();
+    if (fs.existsSync(metaFile)) {
+      try {
+        fs.unlinkSync(metaFile);
+      } catch {}
+    }
+    return res;
+  }
+
   // Stop service first
   await stopService(runnerDir).catch(() => {});
 
@@ -364,10 +409,25 @@ export async function removeRunner(
  * Gets comprehensive status of the runner.
  */
 export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<RunnerStatusInfo> {
+  const localMeta = await readLocalMetadata();
+  if (localMeta?.mode === "docker") {
+    const dStatus = await getDockerRunnerStatus(localMeta.containerName);
+    return {
+      installed: dStatus.exists,
+      configured: dStatus.exists,
+      runnerName: localMeta.name,
+      targetUrl: localMeta.url,
+      labels: localMeta.labels,
+      serviceInstalled: dStatus.exists,
+      serviceRunning: dStatus.running,
+      mode: "docker",
+      containerName: localMeta.containerName,
+    };
+  }
+
   const installed = isRunnerInstalled(runnerDir);
   const configured = isRunnerConfigured(runnerDir);
   const officialConfig = await readOfficialRunnerConfig(runnerDir);
-  const localMeta = await readLocalMetadata();
 
   let serviceRunning = false;
   let activePid: number | undefined;
@@ -422,7 +482,7 @@ async function isPidAlive(pid: number): Promise<boolean> {
 }
 
 export interface ActiveProcessInfo {
-  pid: number;
+  pid: number | string;
   name: string;
   runnerName?: string;
   targetUrl?: string;
@@ -434,6 +494,18 @@ export interface ActiveProcessInfo {
  * Runs the runner attached in the foreground, streaming stdout/stderr in real time.
  */
 export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<number> {
+  const localMeta = await readLocalMetadata();
+  if (localMeta?.mode === "docker") {
+    const container = localMeta.containerName || "upstand-dgrunner-linux";
+    // Check if container is running; if not, restart it
+    const status = await getDockerRunnerStatus(container);
+    if (!status.running) {
+      await restartDockerRunner(container);
+    }
+    await tailDockerRunnerLogs(container, true);
+    return 0;
+  }
+
   await ensureRunnerEnvironment(runnerDir);
 
   const { spawn } = await import("node:child_process");
@@ -485,7 +557,7 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
 }
 
 /**
- * Lists active runner processes on the host.
+ * Lists active runner processes on the host and Docker containers.
  */
 export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promise<ActiveProcessInfo[]> {
   const officialConfig = await readOfficialRunnerConfig(runnerDir);
@@ -495,6 +567,31 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
 
   const results: ActiveProcessInfo[] = [];
 
+  // 1. Check Docker runner containers
+  try {
+    const dockerPs = await execCommand("docker", [
+      "ps",
+      "--filter", "name=upstand-dgrunner",
+      "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}",
+    ]);
+    if (dockerPs.exitCode === 0 && dockerPs.stdout.trim()) {
+      const lines = dockerPs.stdout.split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        const [id, name, status, image] = line.split("\t");
+        if (id && name) {
+          results.push({
+            pid: id.slice(0, 12),
+            name: `${name} (docker)`,
+            runnerName: localMeta?.name || name,
+            targetUrl: localMeta?.url || targetUrl,
+            status: status || "Up (healthy)",
+          });
+        }
+      }
+    }
+  } catch {}
+
+  // 2. Check Host processes
   if (process.platform === "win32") {
     const psCmd = `Get-Process -Name 'Runner.Listener' -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, WorkingSet64 | ConvertTo-Json -Compress`;
     const res = await execCommand("powershell.exe", ["-NoProfile", "-Command", psCmd]);
@@ -544,6 +641,12 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
  * Follows/tails runner log output.
  */
 export async function tailRunnerLogs(options: { follow?: boolean; lines?: number; baseDir?: string } = {}): Promise<void> {
+  const localMeta = await readLocalMetadata(options.baseDir);
+  if (localMeta?.mode === "docker") {
+    await tailDockerRunnerLogs(localMeta.containerName, options.follow);
+    return;
+  }
+
   const baseDir = options.baseDir || DEFAULT_BASE_DIR;
   const logFile = path.join(baseDir, "runner-stdout.log");
 

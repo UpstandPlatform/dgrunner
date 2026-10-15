@@ -23,13 +23,44 @@ export interface DoctorReport {
   checks: CheckResult[];
 }
 
-export async function runDoctorChecks(targetDir = DEFAULT_BASE_DIR): Promise<DoctorReport> {
+export function isWsl(): boolean {
+  if (process.platform !== "linux") return false;
+  try {
+    return (
+      os.release().toLowerCase().includes("microsoft") ||
+      os.release().toLowerCase().includes("wsl")
+    );
+  } catch {
+    return false;
+  }
+}
+
+export interface DoctorOptions {
+  targetDir?: string;
+  targetEnv?: "windows" | "docker" | "wsl" | "native";
+}
+
+export async function runDoctorChecks(
+  targetDirOrOptions?: string | DoctorOptions,
+  legacyOptions?: DoctorOptions
+): Promise<DoctorReport> {
+  const options: DoctorOptions =
+    typeof targetDirOrOptions === "string"
+      ? { targetDir: targetDirOrOptions, ...(legacyOptions || {}) }
+      : targetDirOrOptions || {};
+
+  const targetDir = options.targetDir || DEFAULT_BASE_DIR;
+  const targetEnv = options.targetEnv;
+  const isDockerMode = targetEnv === "docker";
+
   const checks: CheckResult[] = [];
 
   // 1. Platform & Architecture
   const platform = process.platform;
   const arch = process.arch;
+  const inWsl = isWsl();
   const isSupportedPlatform =
+    isDockerMode ||
     (platform === "linux" && (arch === "x64" || arch === "arm64")) ||
     (platform === "win32" && (arch === "x64" || arch === "arm64"));
 
@@ -38,7 +69,9 @@ export async function runDoctorChecks(targetDir = DEFAULT_BASE_DIR): Promise<Doc
       id: "platform",
       name: "Operating System & Architecture",
       status: "pass",
-      message: `Supported platform: ${platform} (${arch})`,
+      message: isDockerMode
+        ? `Supported host: ${platform} (${arch}) running Docker Linux runner`
+        : `Supported platform: ${platform} (${arch})${inWsl ? " [WSL2 Environment]" : ""}`,
     });
   } else {
     checks.push({
@@ -99,7 +132,7 @@ export async function runDoctorChecks(targetDir = DEFAULT_BASE_DIR): Promise<Doc
       message: `Installed (${gitRes.stdout})`,
     });
 
-    if (platform === "win32") {
+    if (platform === "win32" && !isDockerMode) {
       const gitBashDir = await resolveGitBashDir();
       if (gitBashDir) {
         checks.push({
@@ -124,8 +157,10 @@ export async function runDoctorChecks(targetDir = DEFAULT_BASE_DIR): Promise<Doc
     checks.push({
       id: "git",
       name: "Git Version Control",
-      status: "fail",
-      message: "Git is not installed or not in system PATH.",
+      status: isDockerMode ? "warn" : "fail",
+      message: isDockerMode
+        ? "Git not found on host (container includes official internal Git)."
+        : "Git is not installed or not in system PATH.",
       remediation: "Install Git from https://git-scm.com and ensure it is available in PATH.",
     });
   }
@@ -136,18 +171,42 @@ export async function runDoctorChecks(targetDir = DEFAULT_BASE_DIR): Promise<Doc
     checks.push({
       id: "docker",
       name: "Docker Engine",
-      status: "fail",
-      message: "Docker daemon is not running or not accessible.",
+      status: isDockerMode ? "fail" : "warn",
+      message: isDockerMode
+        ? "Docker daemon is not running or not accessible."
+        : "Docker daemon is not running (optional for host workflows).",
       detail: dockerSec.rawError,
-      remediation: "Start Docker Desktop or the dockerd service and verify 'docker info' succeeds.",
+      remediation: inWsl
+        ? "In Docker Desktop for Windows: Settings -> Resources -> WSL integration -> Enable integration for your WSL distro."
+        : "Start Docker Desktop or the dockerd service and verify 'docker info' succeeds.",
     });
   } else {
-    checks.push({
-      id: "docker",
-      name: "Docker Engine",
-      status: "pass",
-      message: `Docker engine active (v${dockerSec.version || "unknown"})`,
-    });
+    // Verify Linux container support if in Docker mode
+    let osType = "linux";
+    if (platform === "win32") {
+      const osTypeRes = await execCommand("docker", ["info", "--format", "{{.OSType}}"]);
+      if (osTypeRes.exitCode === 0 && osTypeRes.stdout.trim()) {
+        osType = osTypeRes.stdout.trim().toLowerCase();
+      }
+    }
+
+    if (isDockerMode && osType !== "linux") {
+      checks.push({
+        id: "docker",
+        name: "Docker Engine",
+        status: "fail",
+        message: "Docker engine is running Windows containers mode.",
+        detail: "GitHub Actions runner containers require Linux container support.",
+        remediation: "Right-click Docker Desktop icon in tray and select 'Switch to Linux containers...'",
+      });
+    } else {
+      checks.push({
+        id: "docker",
+        name: "Docker Engine",
+        status: "pass",
+        message: `Docker engine active (v${dockerSec.version || "unknown"}, ${osType} containers)`,
+      });
+    }
 
     if (dockerSec.insecureTcpSocket) {
       checks.push({
@@ -168,11 +227,20 @@ export async function runDoctorChecks(targetDir = DEFAULT_BASE_DIR): Promise<Doc
           status: "pass",
           message: "Rootless Docker is enabled (workflows cannot escape to host root)",
         });
+      } else if (inWsl) {
+        checks.push({
+          id: "docker-rootless",
+          name: "Docker in WSL Environment",
+          status: "warn",
+          message: "Docker daemon in WSL is running in standard host mode.",
+          detail: "WSL2 provides hypervisor isolation from the host Windows OS.",
+          remediation: "Rootless Docker can be configured, or you can use dgrunner's Docker Container mode from Windows.",
+        });
       } else {
         checks.push({
           id: "docker-rootless",
           name: "Rootless Docker Isolation",
-          status: "fail",
+          status: isDockerMode ? "warn" : "fail",
           message: "Docker daemon is running in root mode.",
           detail:
             "On Linux, container workflows with Docker access can manipulate the host filesystem as root.",
