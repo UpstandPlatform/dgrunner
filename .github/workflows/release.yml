@@ -64,7 +64,7 @@ jobs:
 
       - name: Upload verified npm package
         if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-package
           path: release/*.tgz
@@ -89,7 +89,7 @@ jobs:
         run: npm install --global npm@11.7.0
 
       - name: Download verified npm package
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-package
           path: release
@@ -106,7 +106,7 @@ jobs:
       contents: write
     steps:
       - name: Download verified npm package
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-package
           path: release
