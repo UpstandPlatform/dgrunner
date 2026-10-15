@@ -1,147 +1,189 @@
 # dgrunner 🚀
 
-> **Turn your PC + Docker into a secure, persistent self-hosted GitHub Actions runner with pre-flight security checks, service management, and step-by-step verification.**
+> **Transform any PC + Docker into a hardened, persistent self-hosted GitHub Actions runner with pre-flight security validation, service management, and automated test workflows.**
 
 Built with TypeScript and [Commander](https://www.npmjs.com/package/commander).
 
 ---
 
-## 🔒 Security Principles
+## 📑 Table of Contents
 
-GitHub strongly advises against using self-hosted runners with public repositories because pull requests from forks can execute arbitrary code on the runner machine. `dgrunner` is built around rigorous security best practices:
+- [Why dgrunner?](#-why-dgrunner)
+- [Security Model & Guardrails](#-security-model--guardrails)
+- [Prerequisites](#-prerequisites)
+- [Installation](#-installation)
+  - [Global Install (Recommended)](#1-global-installation-recommended)
+  - [Zero-Install via npx](#2-zero-install-via-npx)
+  - [Install from Source](#3-install-from-source)
+- [Quick Start Guide](#-quick-start-guide)
+- [CLI Command Reference](#-cli-command-reference)
+  - [`dgrunner doctor`](#dgrunner-doctor)
+  - [`dgrunner setup`](#dgrunner-setup)
+  - [`dgrunner status`](#dgrunner-status)
+  - [`dgrunner start` / `stop` / `restart`](#dgrunner-start--stop--restart)
+  - [`dgrunner remove`](#dgrunner-remove)
+  - [`dgrunner guide`](#dgrunner-guide)
+- [Verifying Your Runner on GitHub](#-verifying-your-runner-on-github)
+- [Platform-Specific Notes & Troubleshooting](#-platform-specific-notes--troubleshooting)
+  - [Windows: Git Bash vs. WSL bash](#windows-git-bash-vs-wsl-bash)
+  - [Linux: Rootless Docker Setup](#linux-rootless-docker-setup)
+  - [Handling Session Conflicts](#handling-session-conflicts)
+- [Development & Testing](#-development--testing)
+- [License](#-license)
 
-- **Private Repositories & Internal Orgs Only**: Designed exclusively for trusted private repositories and organizations.
-- **Unprivileged Execution**: Enforces non-root user execution on Linux and standard user permissions on Windows.
-- **Rootless Docker Enforcement**: On Linux, pre-flight checks enforce rootless Docker so workflow containers cannot access or compromise host root.
-- **Package Integrity Verification**: Downloads official GitHub Actions runner packages and verifies their SHA-256 checksum before extracting.
-- **Ephemeral Credentials**: Short-lived runner registration tokens are accepted securely via masked input, used immediately for registration, and never written to logs or persistent config files.
-- **Restricted Filesystem Permissions**: Local directories and metadata are created with restricted permissions (`0700` / `0600`).
+---
+
+## 💡 Why dgrunner?
+
+Self-hosting GitHub Actions runners gives you bare-metal speed, custom hardware/GPU access, and zero compute minute limits. However, running arbitrary CI/CD code on personal workstations or company machines poses severe security risks if misconfigured.
+
+`dgrunner` solves this by automating:
+- **Pre-flight security audits** before any binary is installed.
+- **Automated package integrity verification** (SHA-256 validation against official GitHub releases).
+- **Persistent OS background service integration** across Linux and Windows.
+- **Docker integration** with rootless isolation checks.
+- **Automated verification workflows** to validate host, container, and security boundaries.
+
+---
+
+## 🔒 Security Model & Guardrails
+
+GitHub explicitly advises against using self-hosted runners on public repositories because pull requests from public forks can execute arbitrary code on the runner machine. `dgrunner` enforces strict security boundaries:
+
+1. **Private Repositories & Internal Organizations Only**
+   - The CLI guides you exclusively through private repository and organization setup.
+2. **Unprivileged Execution**
+   - Refuses root execution on Linux (`UID 0`) and checks user isolation on Windows.
+3. **Rootless Docker Enforcement on Linux**
+   - Workflows with Docker access can easily compromise a host root filesystem if Docker runs in root mode. `dgrunner` audits and enforces rootless Docker (`dockerd-rootless-setuptool.sh`).
+4. **Binary Tamper Protection (SHA-256)**
+   - All runner binaries are downloaded directly from official GitHub releases and cryptographically verified against official SHA-256 checksums before extraction.
+5. **Ephemeral Secrets**
+   - Short-lived runner registration and removal tokens are entered via masked password prompts, used only in memory during configuration, and never logged or persisted to disk.
+6. **Filesystem Permission Hardening**
+   - Directories and local metadata files are created with restricted POSIX permissions (`0700` / `0600`).
 
 ---
 
 ## 📦 Prerequisites
 
-1. **Operating System**: Linux (`x64`, `arm64`) or Windows (`x64`).
-2. **Node.js**: `v18.0.0` or higher.
-3. **Git**: Installed and available in system PATH.
-4. **Docker**: Docker Desktop (Windows) or Rootless Docker (Linux).
+Before setting up a runner, ensure your system has:
+
+| Dependency | Minimum Version | Notes |
+| :--- | :--- | :--- |
+| **Node.js** | `>= 18.0.0` | Tested on Node.js 18, 20, 22, and 25 |
+| **Git** | `>= 2.25.0` | Required for checkout steps (Git for Windows on Windows) |
+| **Docker** | Engine / Desktop | Docker Desktop (Windows) or Rootless Docker (Linux) |
+| **Operating System** | Linux / Windows | Linux (`x64`, `arm64`) or Windows (`x64`) |
 
 ---
 
-## ⚡ Quick Start
+## 📥 Installation
 
-### 1. Run Pre-flight Checks
+You can install and use `dgrunner` in three ways:
 
-Ensure your machine and Docker daemon meet all security and system prerequisites:
+### 1. Global Installation (Recommended)
+
+Install `dgrunner` globally on your machine using npm:
 
 ```bash
-npx dgrunner doctor
+npm install -g dgrunner
 ```
 
-### 2. Interactive Setup Wizard
-
-Running `dgrunner` with no arguments launches the guided interactive setup wizard:
+Once installed globally, you can invoke the CLI from any terminal directory:
 
 ```bash
+dgrunner --help
+dgrunner doctor
+```
+
+To update to the latest version:
+```bash
+npm update -g dgrunner
+```
+
+To uninstall:
+```bash
+npm uninstall -g dgrunner
+```
+
+---
+
+### 2. Zero-Install via npx
+
+Run the latest release directly without installing it globally:
+
+```bash
+# Launch interactive wizard
 npx dgrunner
-```
 
-The wizard will:
-1. Run pre-flight security checks.
-2. Prompt for your repository or organization URL.
-3. Securely prompt for your short-lived registration token.
-4. Download and SHA-256 verify the official runner package.
-5. Register the runner with GitHub Actions.
-6. Install and start the background persistent service.
-7. Offer to automatically generate `.github/workflows/verify-runner.yml`.
+# Run diagnostics
+npx dgrunner doctor
 
----
-
-## 🛠️ CLI Commands
-
-```text
-Usage: dgrunner [options] [command]
-
-Secure self-hosted GitHub Actions runner CLI with Docker
-
-Options:
-  -V, --version      output the version number
-  -h, --help         Display help for command
-
-Commands:
-  doctor [options]   Run pre-flight security, dependency, and environment checks
-  setup [options]    Set up, configure, and start the self-hosted GitHub Actions runner
-  status [options]   Check status of the installed runner and background service
-  start [options]    Start the persistent runner background service
-  stop [options]     Stop the persistent runner background service
-  restart [options]  Restart the persistent runner background service
-  remove [options]   Unregister and remove the GitHub Actions runner from GitHub
-  guide [options]    View step-by-step GitHub runner installation and integration guides
-```
-
-### Command Details
-
-#### `dgrunner doctor`
-Runs comprehensive checks for platform support, user privileges, Git, Docker daemon accessibility, Docker rootless/socket security, GitHub API reachability, and disk space.
-```bash
-dgrunner doctor [--strict] [--dir <path>]
-```
-
-#### `dgrunner setup`
-Full automated setup or scripted unattended setup via CLI flags:
-```bash
-dgrunner setup \
-  --url https://github.com/my-org/my-private-repo \
-  --token <SHORT_LIVED_TOKEN> \
-  --name my-workstation-runner \
-  --labels self-hosted,dgrunner,gpu
-```
-
-#### `dgrunner status`
-Inspects installed runner metadata, configuration, and background service state.
-```bash
-dgrunner status
-```
-
-#### `dgrunner start` / `stop` / `restart`
-Controls the persistent background runner service on the host machine.
-```bash
-dgrunner start
-dgrunner stop
-dgrunner restart
-```
-
-#### `dgrunner remove`
-Unregisters the runner from GitHub Actions and tears down local services using a short-lived removal token.
-```bash
-dgrunner remove
-```
-
-#### `dgrunner guide`
-Displays colorized terminal instructions on how to navigate GitHub settings to retrieve tokens and configure repositories safely:
-```bash
-# View terminal integration guide
-dgrunner guide
-
-# Generate ready-to-test verification workflow
-dgrunner guide --generate-workflow
+# View integration guide
+npx dgrunner guide
 ```
 
 ---
 
-## 🧪 Testing Your Runner on GitHub
+### 3. Install from Source
 
-Generate the verification workflow file:
+If you want to contribute, modify, or inspect the codebase locally:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/mhbdev/dgrunner.git
+cd dgrunner
+
+# 2. Install dependencies
+npm install
+
+# 3. Build the CLI bundle
+npm run build
+
+# 4. Link globally (makes 'dgrunner' available in terminal)
+npm link
+```
+
+---
+
+## ⚡ Quick Start Guide
+
+### Step 1: Pre-flight Audit
+Run the built-in diagnostic doctor to ensure your PC, Git, Docker, and network meet all requirements:
+
+```bash
+dgrunner doctor
+```
+
+### Step 2: Retrieve your Short-Lived Token from GitHub
+1. Navigate to your **private** repository on GitHub.
+2. Click **Settings** ➔ **Actions** ➔ **Runners**.
+3. Click the green **New self-hosted runner** button.
+4. Copy the registration token shown under *Configure* (`--token <TOKEN>`).
+
+### Step 3: Run the Setup Wizard
+Launch the guided setup wizard:
+
+```bash
+dgrunner
+```
+
+Follow the prompts:
+- Select **Private Repository** (or Organization).
+- Enter your repository URL (e.g. `https://github.com/owner/repo`).
+- Paste your short-lived registration token (hidden input).
+- Confirm the runner name and labels.
+- `dgrunner` will download the official runner, verify its SHA-256 hash, register it with GitHub, and launch the background service.
+
+### Step 4: Verify with an Automated Workflow
+Generate the ready-to-use verification workflow:
+
 ```bash
 dgrunner guide --generate-workflow
 ```
 
-This creates `.github/workflows/verify-runner.yml` in your project with 3 automated test jobs:
-1. **Host Verification**: Prints hostname, current user, OS information, and workspace directory.
-2. **Docker Container Execution**: Executes a test container (`alpine:latest`) to verify host Docker engine access.
-3. **Security Boundaries**: Verifies non-root execution and container namespace isolation.
-
-Push this workflow to your private repository:
+Push `.github/workflows/verify-runner.yml` to your repository:
 ```bash
 git add .github/workflows/verify-runner.yml
 git commit -m "ci: verify self-hosted runner"
@@ -150,19 +192,238 @@ git push
 
 ---
 
-## 📜 Development & Testing
+## 🛠️ CLI Command Reference
+
+### `dgrunner doctor`
+Runs a battery of system diagnostics and security audits:
+- Host OS and CPU architecture compatibility.
+- User privilege isolation (warns on elevated Windows admin; errors on Linux root).
+- Git version and PATH availability.
+- Git Bash detection on Windows (to avoid WSL collisions).
+- Docker engine availability and daemon responsiveness.
+- Docker rootless mode audit on Linux.
+- Unauthenticated remote Docker TCP socket check.
+- GitHub HTTPS API reachability and latency.
+- Free disk space availability.
 
 ```bash
-# Install dependencies
-npm install
+dgrunner doctor
+dgrunner doctor --strict        # Exits with code 1 if warnings or errors exist
+dgrunner doctor --dir ~/runner  # Check specific installation path
+```
 
-# Run type check
+---
+
+### `dgrunner setup`
+Full automated setup or scripted unattended setup via flags:
+
+```bash
+# Interactive wizard (default when flags are omitted)
+dgrunner setup
+
+# Scripted / Unattended setup
+dgrunner setup \
+  --url https://github.com/owner/repo \
+  --token <REGISTRATION_TOKEN> \
+  --name my-workstation \
+  --labels self-hosted,dgrunner,gpu \
+  --dir ~/.dgrunner/actions-runner
+```
+
+**Options:**
+- `-u, --url <url>`: Target GitHub repository or organization URL.
+- `-t, --token <token>`: GitHub Actions registration token.
+- `-n, --name <name>`: Custom runner name (defaults to `<hostname>-dgrunner`).
+- `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,gpu`).
+- `-d, --dir <path>`: Runner installation directory (defaults to `~/.dgrunner/actions-runner`).
+- `--force`: Bypass critical pre-flight failures at your own risk.
+- `--no-service`: Configure without immediately starting the persistent background service.
+
+---
+
+### `dgrunner status`
+Inspects installed runner metadata, configuration, and background service state:
+
+```bash
+dgrunner status
+```
+
+**Sample Output:**
+```text
+=== dgrunner Status Dashboard ===
+
+┌─ RUNNER STATUS ────────────────────────────────────────────┐
+│ Installed:   Yes                                           │
+│ Configured:  Yes                                           │
+│ Runner Name: dordoone-runner                               │
+│ Target URL:  https://github.com/mhbdev/dordoone            │
+│ Labels:      self-hosted, dgrunner, windows, x64           │
+│ Service:     Active & Running (PID: 48080)                 │
+│ Directory:   C:\Users\username\.dgrunner\actions-runner    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### `dgrunner start` / `stop` / `restart`
+Manages the lifecycle of the persistent runner daemon:
+
+```bash
+# Start the runner service in the background
+dgrunner start
+
+# Gracefully stop the runner service
+dgrunner stop
+
+# Restart the runner service
+dgrunner restart
+```
+
+---
+
+### `dgrunner remove`
+Safely deregisters the runner from GitHub Actions and removes local service configuration:
+
+```bash
+dgrunner remove
+```
+
+Prompts for a short-lived **removal token** (obtainable from GitHub repo *Settings ➔ Actions ➔ Runners ➔ Click Runner ➔ Remove*).
+
+---
+
+### `dgrunner guide`
+Displays colorized step-by-step instructions on navigating GitHub and safely generating registration tokens:
+
+```bash
+# Display general guide
+dgrunner guide
+
+# Display organization-specific guide
+dgrunner guide --scope org
+
+# Generate test workflow file
+dgrunner guide --generate-workflow
+```
+
+---
+
+## 🧪 Verifying Your Runner on GitHub
+
+When you run `dgrunner guide --generate-workflow`, it writes `.github/workflows/verify-runner.yml` to your repository:
+
+```yaml
+name: Verify dgrunner Self-Hosted Runner
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  verify-host:
+    name: 1. Verify Host & Environment
+    runs-on: ["self-hosted", "dgrunner"]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Print Runner & OS Details
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "Runner Hostname: $(hostname)"
+          echo "Current User:    $(whoami)"
+          echo "OS Details:      $(uname -a 2>/dev/null || cmd.exe /c ver)"
+          echo "Workspace Dir:   $GITHUB_WORKSPACE"
+          echo "Bash Executable: $(which bash 2>/dev/null || echo 'unknown')"
+          echo "======================================"
+
+  verify-docker:
+    name: 2. Verify Docker Container Execution
+    runs-on: ["self-hosted", "dgrunner"]
+    steps:
+      - name: Test Docker CLI & Daemon
+        shell: bash
+        run: |
+          echo "Checking Docker version..."
+          docker --version
+          echo "Running lightweight test container..."
+          docker run --rm alpine:latest echo "Hello from containerized workflow on $(hostname)!"
+
+  verify-security:
+    name: 3. Verify Security Boundaries
+    runs-on: ["self-hosted", "dgrunner"]
+    steps:
+      - name: Check Non-Root User Execution
+        shell: bash
+        run: |
+          if [ "$(id -u 2>/dev/null)" = "0" ]; then
+            echo "WARNING: Workflow is running as root on host!"
+            exit 1
+          else
+            echo "SUCCESS: Workflow running under unprivileged user."
+          fi
+
+      - name: Test Docker User Namespace / Isolation
+        shell: bash
+        run: |
+          docker run --rm alpine:latest id
+          echo "Docker container isolation verified."
+```
+
+---
+
+## 🔧 Platform-Specific Notes & Troubleshooting
+
+### Windows: Git Bash vs. WSL bash
+
+On Windows, GitHub Actions steps configured with `shell: bash` require **Git Bash** (`C:\Program Files\Git\bin\bash.exe`). 
+
+> [!WARNING]
+> If Windows Subsystem for Linux (WSL) is enabled, Windows places `C:\WINDOWS\system32\bash.exe` in PATH. When GitHub runner steps invoke `system32\bash.exe`, it fails with `No such file or directory` because WSL bash receives Windows-style drive paths (`C:\Users\...`).
+> 
+> **How dgrunner fixes this automatically:**
+> `dgrunner` automatically discovers your Git Bash directory and writes it to `~/.dgrunner/actions-runner/.path` and the runner process environment. This guarantees that Git Bash is prioritized over WSL bash for all workflow steps.
+
+### Linux: Rootless Docker Setup
+
+To prevent workflow containers from accessing the host root filesystem, install Rootless Docker:
+
+```bash
+# 1. Install rootless prerequisites
+sudo apt-get install -y uidmap dbus-user-session
+
+# 2. Run the official rootless setup tool
+dockerd-rootless-setuptool.sh install
+
+# 3. Export Docker host environment variable in your profile
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock
+```
+
+Then run `dgrunner doctor` to verify rootless isolation.
+
+### Handling Session Conflicts
+
+If you manually kill or restart the runner, GitHub's broker server may hold the previous session open for 30–60 seconds, resulting in:
+```text
+A session for this runner already exists.
+Runner connect error: Error: Conflict. Retrying until reconnected.
+```
+This is expected behavior from GitHub Actions. The runner will automatically retry and reconnect as soon as GitHub drops the stale session. Alternatively, run `dgrunner restart`.
+
+---
+
+## 💻 Development & Testing
+
+```bash
+# Run TypeScript type check
 npm run typecheck
 
-# Run unit tests
+# Run Vitest test suite
 npm test
 
-# Build bundle
+# Build bundled distribution
 npm run build
 ```
 
@@ -170,4 +431,4 @@ npm run build
 
 ## 📄 License
 
-MIT
+[MIT](LICENSE)
