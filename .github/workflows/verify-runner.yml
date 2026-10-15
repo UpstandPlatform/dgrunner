@@ -8,7 +8,7 @@ on:
 jobs:
   verify-host:
     name: 1. Verify Host & Environment
-    runs-on: ["self-hosted","dgrunner"]
+    runs-on: ["self-hosted","dgrunner","windows","x64"]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -25,7 +25,7 @@ jobs:
 
   verify-docker:
     name: 2. Verify Docker Container Execution
-    runs-on: ["self-hosted","dgrunner"]
+    runs-on: ["self-hosted","dgrunner","windows","x64"]
     steps:
       - name: Test Docker CLI & Daemon
         shell: bash
@@ -37,7 +37,7 @@ jobs:
 
   verify-security:
     name: 3. Verify Security Boundaries
-    runs-on: ["self-hosted","dgrunner"]
+    runs-on: ["self-hosted","dgrunner","windows","x64"]
     steps:
       - name: Check Non-Root User Execution
         shell: bash
