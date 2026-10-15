@@ -20,12 +20,12 @@ jobs:
         node-version: [22.x, 24.x]
     steps:
       - name: Checkout tagged source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.1
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 0
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@249970729cb0ef3589644e289664e5dc5ba9c38 # v6.0.0
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -77,7 +77,7 @@ jobs:
       id-token: write
     steps:
       - name: Setup Node.js 24
-        uses: actions/setup-node@249970729cb0ef3589644e289664e5dc5ba9c38 # v6.0.0
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: 24.x
 
