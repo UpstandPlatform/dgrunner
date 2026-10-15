@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
 import { execCommand } from "../src/utils/exec.js";
-import { DEFAULT_RUNNER_DIR } from "../config/constants.js";
+import { DEFAULT_RUNNER_DIR } from "../src/config/constants.js";
 
 describe("Exec Utility", () => {
   it("should successfully execute config.cmd on Windows when present", async () => {
