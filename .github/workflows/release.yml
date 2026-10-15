@@ -31,6 +31,9 @@ jobs:
           node-version: 22.x
           cache: 'npm'
 
+      - name: Upgrade npm to latest (Required for OIDC Trusted Publishing)
+        run: npm install -g npm@latest
+
       - name: Install Dependencies
         run: npm ci
 
@@ -46,12 +49,15 @@ jobs:
       - name: Verify Package Contents
         run: npm pack --dry-run
 
-      - name: Publish to npm (Trusted Publishing / Provenance)
+      - name: Ensure clean .npmrc for OIDC Trusted Publishing
         run: |
+          rm -f ~/.npmrc .npmrc "$NPM_CONFIG_USERCONFIG"
           if [ -n "${{ secrets.NPM_TOKEN }}" ]; then
             echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
           fi
-          npm publish --access public --provenance
+
+      - name: Publish to npm (Trusted Publishing / Provenance)
+        run: npm publish --access public --provenance
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
