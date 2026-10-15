@@ -3,6 +3,7 @@ import { execCommand } from "../utils/exec.js";
 import { getFreeDiskBytes } from "../utils/fs.js";
 import { DEFAULT_BASE_DIR, MINIMUM_FREE_DISK_BYTES } from "../config/constants.js";
 import { inspectDockerSecurity, isSuperUser } from "./security.js";
+import { resolveGitBashDir } from "./runner-manager.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -97,6 +98,28 @@ export async function runDoctorChecks(targetDir = DEFAULT_BASE_DIR): Promise<Doc
       status: "pass",
       message: `Installed (${gitRes.stdout})`,
     });
+
+    if (platform === "win32") {
+      const gitBashDir = await resolveGitBashDir();
+      if (gitBashDir) {
+        checks.push({
+          id: "git-bash",
+          name: "Git Bash Shell (Windows)",
+          status: "pass",
+          message: `Git Bash detected at ${gitBashDir}`,
+          detail: "dgrunner automatically configures the runner environment to prioritize Git Bash over WSL bash.",
+        });
+      } else {
+        checks.push({
+          id: "git-bash",
+          name: "Git Bash Shell (Windows)",
+          status: "warn",
+          message: "Git Bash (bash.exe) not found in standard Git directories.",
+          detail: "Workflows using 'shell: bash' on Windows may fail if WSL bash is invoked with Windows paths.",
+          remediation: "Ensure Git for Windows is installed with Git Bash from https://git-scm.com.",
+        });
+      }
+    }
   } else {
     checks.push({
       id: "git",

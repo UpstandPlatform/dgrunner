@@ -73,6 +73,62 @@ export async function saveLocalMetadata(meta: RunnerMetadata, baseDir = DEFAULT_
 }
 
 /**
+ * Resolves the Git Bash directory on Windows to ensure bash scripts run via Git Bash rather than WSL.
+ */
+export async function resolveGitBashDir(): Promise<string | null> {
+  if (process.platform !== "win32") return null;
+
+  // 1. Try finding where git.exe is installed
+  const res = await execCommand("where.exe", ["git.exe"]);
+  if (res.exitCode === 0 && res.stdout) {
+    const gitPath = res.stdout.split(/\r?\n/)[0].trim();
+    const gitRoot = path.dirname(path.dirname(gitPath));
+    const binBash = path.join(gitRoot, "bin", "bash.exe");
+    if (fs.existsSync(binBash)) return path.dirname(binBash);
+    const usrBinBash = path.join(gitRoot, "usr", "bin", "bash.exe");
+    if (fs.existsSync(usrBinBash)) return path.dirname(usrBinBash);
+  }
+
+  // 2. Common installation paths
+  const commonCandidates = [
+    "C:\\Program Files\\Git\\bin",
+    "C:\\Program Files (x86)\\Git\\bin",
+    path.join(os.homedir(), "AppData", "Local", "Programs", "Git", "bin"),
+  ];
+
+  for (const dir of commonCandidates) {
+    if (fs.existsSync(path.join(dir, "bash.exe"))) {
+      return dir;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Ensures the runner's .path file contains Git Bash (on Windows) so that workflow jobs
+ * find Git Bash before Windows System32 bash (WSL).
+ */
+export async function ensureRunnerEnvironment(runnerDir = DEFAULT_RUNNER_DIR): Promise<void> {
+  if (process.platform === "win32") {
+    const gitBin = await resolveGitBashDir();
+    if (gitBin) {
+      const dotPath = path.join(runnerDir, ".path");
+      let lines: string[] = [];
+      if (fs.existsSync(dotPath)) {
+        try {
+          lines = (await fsPromises.readFile(dotPath, "utf-8")).split(/\r?\n/).filter(Boolean);
+        } catch {}
+      }
+      if (!lines.includes(gitBin)) {
+        lines.unshift(gitBin);
+        await fsPromises.writeFile(dotPath, lines.join("\r\n") + "\r\n", "utf-8");
+      }
+    }
+  }
+}
+
+/**
  * Configures the downloaded GitHub Actions runner.
  */
 export async function configureRunner(options: {
@@ -90,6 +146,8 @@ export async function configureRunner(options: {
   const labelsStr = (options.labels && options.labels.length > 0)
     ? options.labels.join(",")
     : `self-hosted,dgrunner,${process.platform === "win32" ? "windows" : "linux"},${process.arch}`;
+
+  await ensureRunnerEnvironment(runnerDir);
 
   const args: string[] = [
     "--unattended",
@@ -188,15 +246,28 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
       }
     }
 
+    await ensureRunnerEnvironment(runnerDir);
+
+    const gitBin = await resolveGitBashDir();
+    const env = { ...process.env };
+    if (gitBin) {
+      env.PATH = `${gitBin};${env.PATH || ""}`;
+    }
+
     const { spawn } = await import("node:child_process");
     const outLog = fs.openSync(path.join(DEFAULT_BASE_DIR, "runner-stdout.log"), "a");
     const errLog = fs.openSync(path.join(DEFAULT_BASE_DIR, "runner-stderr.log"), "a");
 
-    const child = spawn("cmd.exe", ["/c", runCmd], {
+    const listenerExe = path.join(runnerDir, "bin", "Runner.Listener.exe");
+    const execFile = fs.existsSync(listenerExe) ? listenerExe : "cmd.exe";
+    const execArgs = fs.existsSync(listenerExe) ? ["run"] : ["/c", runCmd];
+
+    const child = spawn(execFile, execArgs, {
       cwd: runnerDir,
       detached: true,
       stdio: ["ignore", outLog, errLog],
       windowsHide: true,
+      env,
     });
 
     child.unref();
@@ -222,24 +293,25 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
  */
 export async function stopService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
   if (process.platform === "win32") {
+    // Terminate Runner.Listener.exe if active
+    await execCommand("taskkill.exe", ["/f", "/im", "Runner.Listener.exe"]).catch(() => {});
+
     const pidFile = path.join(DEFAULT_BASE_DIR, "runner.pid");
-    if (!fs.existsSync(pidFile)) {
-      return { success: true, message: "Runner is not currently running (no PID file)." };
-    }
-
-    const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-    if (!isNaN(pid)) {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {
-        // Process might already be dead
+    if (fs.existsSync(pidFile)) {
+      const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+      if (!isNaN(pid)) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          // Process might already be dead
+        }
       }
+      try {
+        fs.unlinkSync(pidFile);
+      } catch {}
     }
-    try {
-      fs.unlinkSync(pidFile);
-    } catch {}
 
-    return { success: true, message: `Runner process (PID ${pid}) stopped.` };
+    return { success: true, message: "Runner service stopped." };
   } else {
     // Linux svc.sh stop
     const res = await execCommand("sudo", ["./svc.sh", "stop"], { cwd: runnerDir });
@@ -301,12 +373,25 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
   let activePid: number | undefined;
 
   if (process.platform === "win32") {
-    const pidFile = path.join(DEFAULT_BASE_DIR, "runner.pid");
-    if (fs.existsSync(pidFile)) {
-      const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-      if (!isNaN(pid) && (await isPidAlive(pid))) {
-        serviceRunning = true;
-        activePid = pid;
+    const taskRes = await execCommand("tasklist.exe", [
+      "/fi", "IMAGENAME eq Runner.Listener.exe",
+      "/fo", "csv",
+      "/nh",
+    ]);
+    if (taskRes.exitCode === 0 && taskRes.stdout.includes("Runner.Listener.exe")) {
+      serviceRunning = true;
+      const match = taskRes.stdout.match(/"Runner\.Listener\.exe","(\d+)"/i);
+      if (match && match[1]) {
+        activePid = parseInt(match[1], 10);
+      }
+    } else {
+      const pidFile = path.join(DEFAULT_BASE_DIR, "runner.pid");
+      if (fs.existsSync(pidFile)) {
+        const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+        if (!isNaN(pid) && (await isPidAlive(pid))) {
+          serviceRunning = true;
+          activePid = pid;
+        }
       }
     }
   } else {
