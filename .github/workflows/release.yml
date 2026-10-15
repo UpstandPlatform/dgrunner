@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
         node-version: [22.x, 24.x]
     steps:
       - name: Checkout tagged source
@@ -55,11 +55,11 @@ jobs:
         run: npm pack --dry-run --ignore-scripts
 
       - name: Prepare release artifact directory
-        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
+        if: matrix.os == 'ubuntu-24.04' && matrix.node-version == '24.x'
         run: mkdir -p release
 
       - name: Pack release artifact
-        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
+        if: matrix.os == 'ubuntu-24.04' && matrix.node-version == '24.x'
         run: npm pack --ignore-scripts --pack-destination release
 
       - name: Upload verified npm package
