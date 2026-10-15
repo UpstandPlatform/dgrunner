@@ -54,6 +54,10 @@ jobs:
       - name: Validate package contents
         run: npm pack --dry-run --ignore-scripts
 
+      - name: Prepare release artifact directory
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
+        run: mkdir -p release
+
       - name: Pack release artifact
         if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
         run: npm pack --ignore-scripts --pack-destination release
