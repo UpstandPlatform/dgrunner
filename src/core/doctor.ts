@@ -182,13 +182,7 @@ export async function runDoctorChecks(
     });
   } else {
     // Verify Linux container support if in Docker mode
-    let osType = "linux";
-    if (platform === "win32") {
-      const osTypeRes = await execCommand("docker", ["info", "--format", "{{.OSType}}"]);
-      if (osTypeRes.exitCode === 0 && osTypeRes.stdout.trim()) {
-        osType = osTypeRes.stdout.trim().toLowerCase();
-      }
-    }
+    const osType = dockerSec.osType || "linux";
 
     if (isDockerMode && osType !== "linux") {
       checks.push({

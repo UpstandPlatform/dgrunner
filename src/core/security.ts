@@ -4,6 +4,7 @@ import { execCommand } from "../utils/exec.js";
 export interface DockerSecurityStatus {
   available: boolean;
   version?: string;
+  osType?: string;
   isRootless: boolean;
   securityOptions: string[];
   insecureTcpSocket: boolean;
@@ -61,9 +62,12 @@ export async function inspectDockerSecurity(): Promise<DockerSecurityStatus> {
       typeof opt === "string" && opt.toLowerCase().includes("rootless")
     );
 
+    const osType = info.OSType ? String(info.OSType).toLowerCase() : undefined;
+
     return {
       available: true,
       version: info.ServerVersion || undefined,
+      osType,
       isRootless,
       securityOptions,
       insecureTcpSocket,

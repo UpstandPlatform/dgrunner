@@ -17,7 +17,7 @@ describe("Doctor Module", () => {
 
     const dockerCheck = report.checks.find((c) => c.id === "docker");
     expect(dockerCheck).toBeDefined();
-  });
+  }, 60000);
 
   it("should configure checks appropriately for targetEnv: docker", async () => {
     const report = await runDoctorChecks({ targetEnv: "docker" });

@@ -60,12 +60,11 @@ export interface DockerContainerStatus {
 export async function getDockerRunnerStatus(
   containerName = DEFAULT_CONTAINER_NAME
 ): Promise<DockerContainerStatus> {
-  const res = await execCommand("docker", [
-    "inspect",
-    containerName,
-    "--format",
-    "{{json .State}}",
-  ]);
+  const res = await execCommand(
+    "docker",
+    ["inspect", containerName, "--format", "{{json .State}}"],
+    { timeoutMs: 5000 }
+  );
 
   if (res.exitCode !== 0 || !res.stdout.trim()) {
     return {

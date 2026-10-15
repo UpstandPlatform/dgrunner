@@ -59,7 +59,7 @@ export async function getInstalledWslDistros(): Promise<string[]> {
   if (process.platform !== "win32") return [];
 
   try {
-    const { stdout } = await execAsync("wsl.exe -l -q", { encoding: "buffer" });
+    const { stdout } = await execAsync("wsl.exe -l -q", { encoding: "buffer", timeout: 5000 });
     const text = stdout.toString("utf16le");
     const distros = text
       .split(/\r?\n/)
@@ -78,7 +78,7 @@ export async function getAvailableOnlineWslDistros(): Promise<string[]> {
   if (process.platform !== "win32") return [];
 
   try {
-    const { stdout } = await execAsync("wsl.exe -l -o", { encoding: "buffer" });
+    const { stdout } = await execAsync("wsl.exe -l -o", { encoding: "buffer", timeout: 5000 });
     const text = stdout.toString("utf16le");
     const lines = text.split(/\r?\n/).map((s) => s.trim().replace(/\0/g, ""));
     const distros: string[] = [];
