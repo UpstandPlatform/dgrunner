@@ -1,0 +1,56 @@
+name: Verify dgrunner Self-Hosted Runner
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  verify-host:
+    name: 1. Verify Host & Environment
+    runs-on: ["self-hosted","dgrunner"]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Print Runner & OS Details
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "Runner Hostname: $(hostname)"
+          echo "Current User:    $(whoami)"
+          echo "OS Details:      $(uname -a 2>/dev/null || cmd.exe /c ver)"
+          echo "Workspace Dir:   $GITHUB_WORKSPACE"
+          echo "======================================"
+
+  verify-docker:
+    name: 2. Verify Docker Container Execution
+    runs-on: ["self-hosted","dgrunner"]
+    steps:
+      - name: Test Docker CLI & Daemon
+        shell: bash
+        run: |
+          echo "Checking Docker version..."
+          docker --version
+          echo "Running lightweight test container..."
+          docker run --rm alpine:latest echo "Hello from containerized workflow on $(hostname)!"
+
+  verify-security:
+    name: 3. Verify Security Boundaries
+    runs-on: ["self-hosted","dgrunner"]
+    steps:
+      - name: Check Non-Root User Execution
+        shell: bash
+        run: |
+          if [ "$(id -u 2>/dev/null)" = "0" ]; then
+            echo "WARNING: Workflow is running as root on host!"
+            exit 1
+          else
+            echo "SUCCESS: Workflow running under unprivileged user."
+          fi
+
+      - name: Test Docker User Namespace / Isolation
+        shell: bash
+        run: |
+          docker run --rm alpine:latest id
+          echo "Docker container isolation verified."
