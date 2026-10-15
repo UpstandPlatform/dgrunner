@@ -54,9 +54,13 @@ export function registerStatusCommand(program: Command): void {
           )
         : status.serviceInstalled
         ? pc.yellow(status.mode === "docker" ? "Container Stopped" : "Installed, but Stopped")
+        : status.configured && process.platform === "win32"
+        ? pc.yellow("Configured, but not running (no Windows service installed)")
+        : status.configured
+        ? pc.yellow("Configured, but not running")
         : pc.dim("Not configured");
 
-      statusLines.push(`Service:     ${serviceStatus}`);
+      statusLines.push(`Runner state: ${serviceStatus}`);
       if (status.mode !== "docker") {
         statusLines.push(`Directory:   ${options.dir}`);
       }

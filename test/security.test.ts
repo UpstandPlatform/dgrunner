@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validateGitHubUrl, validateRegistrationToken } from "../src/core/security.js";
+import { isInsecureRemoteDockerHost, validateGitHubUrl, validateRegistrationToken } from "../src/core/security.js";
 import { maskToken } from "../src/utils/logger.js";
 
 describe("Security Module", () => {
@@ -31,6 +31,29 @@ describe("Security Module", () => {
     it("should reject empty or malformed URLs", () => {
       expect(validateGitHubUrl("").valid).toBe(false);
       expect(validateGitHubUrl("not-a-url").valid).toBe(false);
+    });
+
+    it("should reject GitHub lookalike URLs and URL fields that could redirect registration", () => {
+      for (const url of [
+        "https://github.com.evil.example/owner/repo",
+        "https://user:password@github.com/owner/repo",
+        "https://github.com:8443/owner/repo",
+        "https://github.com/owner/repo?next=https://evil.example",
+        "https://github.com/owner/%2e%2e/repo",
+      ]) {
+        expect(validateGitHubUrl(url).valid, url).toBe(false);
+      }
+    });
+  });
+
+  describe("isInsecureRemoteDockerHost", () => {
+    it("flags remote TCP hosts but permits loopback and verified TLS", () => {
+      expect(isInsecureRemoteDockerHost("tcp://192.0.2.10:2375")).toBe(true);
+      expect(isInsecureRemoteDockerHost("tcp://localhost:2375")).toBe(false);
+      expect(isInsecureRemoteDockerHost("tcp://127.0.0.2:2375")).toBe(false);
+      expect(isInsecureRemoteDockerHost("tcp://[::1]:2375")).toBe(false);
+      expect(isInsecureRemoteDockerHost("tcp://localhost.evil.example:2375")).toBe(true);
+      expect(isInsecureRemoteDockerHost("tcp://docker.example:2376", "1")).toBe(false);
     });
   });
 

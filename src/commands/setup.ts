@@ -37,7 +37,7 @@ export interface SetupOptions {
   env?: string;
   distro?: string;
   image?: string;
-  noDockerSocket?: boolean;
+  dockerSocket?: boolean;
 }
 
 export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
@@ -390,7 +390,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       labels,
       image: targetImage,
       distro: selectedDistro || targetDistroName,
-      mountDockerSocket: !options.noDockerSocket,
+      mountDockerSocket: options.dockerSocket === true,
     });
 
     if (!dockerRes.success) {
@@ -479,11 +479,18 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
     // Install and start service if requested
     const shouldInstallService = options.service !== false;
     if (shouldInstallService) {
-      logger.info("Setting up persistent host runner service...");
-      await installService(installDir);
+      logger.info(process.platform === "win32"
+        ? "Starting the Windows runner as a background process..."
+        : "Setting up the persistent Linux runner service...");
+      if (process.platform !== "win32") {
+        const installRes = await installService(installDir);
+        if (!installRes.success) logger.warn(`Could not install runner service: ${installRes.message}`);
+      }
       const startRes = await startService(installDir);
       if (startRes.success) {
-        logger.success("Persistent runner service started in the background.");
+        logger.success(process.platform === "win32"
+          ? "Runner background process started. It does not auto-start after Windows sign-out or reboot."
+          : "Persistent runner service started in the background.");
       } else {
         logger.warn(`Could not start service automatically: ${startRes.message}`);
         logger.info(`You can start it manually with: ${pc.cyan("dgrunner start")}`);
@@ -515,7 +522,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
         `Name:        ${pc.bold(runnerName)}`,
         `Target URL:  ${pc.bold(targetUrl!)}`,
         `Labels:      ${labels.join(", ")}`,
-        `Environment: ${pc.cyan(runningInWsl ? `WSL2 Linux (${hostDistroName})` : process.platform === "win32" ? "Windows Native (Host Service)" : `Linux Native (${hostDistroName})`)}`,
+        `Environment: ${pc.cyan(runningInWsl ? `WSL2 Linux (${hostDistroName})` : process.platform === "win32" ? "Windows Native (background process)" : `Linux Native (${hostDistroName})`)}`,
         `Directory:   ${installDir}`,
         `Token:       ${maskToken(token!)} (used ephemerally, not stored)`,
         "",
@@ -544,7 +551,7 @@ export function registerSetupCommand(program: Command): void {
     .option("--env <environment>", "Target runner environment: 'windows', 'docker', 'wsl', or 'native'")
     .option("--distro <distro>", "Linux distribution preset ('ubuntu-24.04', 'ubuntu-22.04', 'debian') or WSL distro name")
     .option("--image <image>", "Custom Docker runner container image")
-    .option("--no-docker-socket", "Do not mount /var/run/docker.sock into Docker runner container")
+    .option("--docker-socket", "Mount the host Docker socket into the runner (grants workflows host-level Docker control)", false)
     .option("--force", "Ignore critical pre-flight check failures and proceed", false)
     .option("--no-service", "Do not install or start persistent background service", false)
     .action(async (options) => {

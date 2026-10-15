@@ -2,10 +2,12 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { DEFAULT_BASE_DIR, DEFAULT_RUNNER_DIR } from "../config/constants.js";
 import { execCommand } from "../utils/exec.js";
 import {
   getDockerRunnerStatus,
+  startDockerContainer,
   stopDockerRunner,
   restartDockerRunner,
   removeDockerRunner,
@@ -46,6 +48,11 @@ export function getRunnerConfigFile(baseDir = DEFAULT_BASE_DIR): string {
   return path.join(baseDir, "dgrunner-meta.json");
 }
 
+function getRunnerPidFile(runnerDir: string): string {
+  const runnerKey = crypto.createHash("sha256").update(path.resolve(runnerDir).toLowerCase()).digest("hex").slice(0, 16);
+  return path.join(DEFAULT_BASE_DIR, `runner-${runnerKey}.pid`);
+}
+
 export function isRunnerInstalled(runnerDir = DEFAULT_RUNNER_DIR): boolean {
   const scriptName = process.platform === "win32" ? "config.cmd" : "config.sh";
   return fs.existsSync(path.join(runnerDir, scriptName));
@@ -81,6 +88,7 @@ export async function readLocalMetadata(baseDir = DEFAULT_BASE_DIR): Promise<Run
 
 export async function saveLocalMetadata(meta: RunnerMetadata, baseDir = DEFAULT_BASE_DIR): Promise<void> {
   const metaFile = getRunnerConfigFile(baseDir);
+  await fsPromises.mkdir(path.dirname(metaFile), { recursive: true, mode: 0o700 });
   await fsPromises.writeFile(metaFile, JSON.stringify(meta, null, 2), {
     mode: 0o600,
     encoding: "utf-8",
@@ -218,18 +226,10 @@ export async function configureRunner(options: ConfigureRunnerOptions): Promise<
  */
 export async function installService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
   if (process.platform === "win32") {
-    // Windows runner uses runner process or PowerShell scheduled task/service
-    // The official runner win-x64 includes service installation via config.cmd --runasservice or running run.cmd
-    // But if already configured, we can install service via PowerShell or runner's action service
-    // Let's check for runner's bin/RunnerListener or service install
-    const serviceScript = path.join(runnerDir, "bin", "RunnerListener.exe");
-    if (fs.existsSync(serviceScript)) {
-      return {
-        success: true,
-        message: "Runner service is ready. Launch with 'dgrunner start' or run.cmd",
-      };
-    }
-    return { success: true, message: "Windows service configuration complete." };
+    return {
+      success: false,
+      message: "Windows native mode is managed as a background process, not an installed Windows service.",
+    };
   } else {
     // Linux svc.sh
     const svcPath = path.join(runnerDir, "svc.sh");
@@ -252,12 +252,10 @@ export async function installService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ 
 export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
   const localMeta = await readLocalMetadata();
   if (localMeta?.mode === "docker") {
-    const res = await restartDockerRunner(localMeta.containerName);
+    const res = await startDockerContainer(localMeta.containerName);
     return {
       success: res.success,
-      message: res.success
-        ? `Docker runner container '${localMeta.containerName}' started.`
-        : res.output,
+      message: res.success ? res.output : res.output,
     };
   }
 
@@ -269,10 +267,11 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
     }
 
     // Launch run.cmd in detached background mode if not already running
-    const pidFile = path.join(DEFAULT_BASE_DIR, "runner.pid");
+    await fsPromises.mkdir(DEFAULT_BASE_DIR, { recursive: true, mode: 0o700 });
+    const pidFile = getRunnerPidFile(runnerDir);
     if (fs.existsSync(pidFile)) {
       const existingPid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-      const isAlive = await isPidAlive(existingPid);
+      const isAlive = !isNaN(existingPid) && await verifyWindowsRunnerProcess(existingPid, runnerDir);
       if (isAlive) {
         return { success: true, message: `Runner is already running with PID ${existingPid}.` };
       }
@@ -287,14 +286,14 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
     }
 
     const { spawn } = await import("node:child_process");
-    const outLog = fs.openSync(path.join(DEFAULT_BASE_DIR, "runner-stdout.log"), "a");
-    const errLog = fs.openSync(path.join(DEFAULT_BASE_DIR, "runner-stderr.log"), "a");
-
     const listenerExe = path.join(runnerDir, "bin", "Runner.Listener.exe");
-    const execFile = fs.existsSync(listenerExe) ? listenerExe : "cmd.exe";
-    const execArgs = fs.existsSync(listenerExe) ? ["run"] : ["/c", runCmd];
+    if (!fs.existsSync(listenerExe)) {
+      return { success: false, message: `Runner listener executable not found at ${listenerExe}` };
+    }
+    const outLog = fs.openSync(path.join(DEFAULT_BASE_DIR, "runner-stdout.log"), "a", 0o600);
+    const errLog = fs.openSync(path.join(DEFAULT_BASE_DIR, "runner-stderr.log"), "a", 0o600);
 
-    const child = spawn(execFile, execArgs, {
+    const child = spawn(listenerExe, ["run"], {
       cwd: runnerDir,
       detached: true,
       stdio: ["ignore", outLog, errLog],
@@ -302,6 +301,18 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
       env,
     });
 
+    const spawnFailure = await new Promise<Error | undefined>((resolve) => {
+      child.once("spawn", () => resolve(undefined));
+      child.once("error", resolve);
+    });
+    if (spawnFailure) {
+      fs.closeSync(outLog);
+      fs.closeSync(errLog);
+      return { success: false, message: `Failed to start runner: ${spawnFailure.message}` };
+    }
+
+    fs.closeSync(outLog);
+    fs.closeSync(errLog);
     child.unref();
 
     if (child.pid) {
@@ -336,17 +347,15 @@ export async function stopService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ suc
   }
 
   if (process.platform === "win32") {
-    // Terminate Runner.Listener.exe if active
-    await execCommand("taskkill.exe", ["/f", "/im", "Runner.Listener.exe"]).catch(() => {});
-
-    const pidFile = path.join(DEFAULT_BASE_DIR, "runner.pid");
+    const pidFile = getRunnerPidFile(runnerDir);
     if (fs.existsSync(pidFile)) {
       const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
       if (!isNaN(pid)) {
-        try {
-          process.kill(pid, "SIGTERM");
-        } catch {
-          // Process might already be dead
+        if (await verifyWindowsRunnerProcess(pid, runnerDir)) {
+          const stopped = await execCommand("taskkill.exe", ["/pid", String(pid), "/t", "/f"]);
+          if (stopped.exitCode !== 0) {
+            return { success: false, message: stopped.stderr || stopped.stdout || "Failed to stop runner process." };
+          }
         }
       }
       try {
@@ -374,9 +383,9 @@ export async function removeRunner(
 ): Promise<{ success: boolean; output: string }> {
   const localMeta = await readLocalMetadata();
   if (localMeta?.mode === "docker") {
-    const res = await removeDockerRunner(localMeta.containerName);
+    const res = await removeDockerRunner(token, localMeta.containerName);
     const metaFile = getRunnerConfigFile();
-    if (fs.existsSync(metaFile)) {
+    if (res.success && fs.existsSync(metaFile)) {
       try {
         fs.unlinkSync(metaFile);
       } catch {}
@@ -403,7 +412,7 @@ export async function removeRunner(
   });
 
   const metaFile = getRunnerConfigFile();
-  if (fs.existsSync(metaFile)) {
+  if (result.exitCode === 0 && fs.existsSync(metaFile)) {
     try {
       fs.unlinkSync(metaFile);
     } catch {}
@@ -445,24 +454,15 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
   let activePid: number | undefined;
 
   if (process.platform === "win32") {
-    const taskRes = await execCommand("tasklist.exe", [
-      "/fi", "IMAGENAME eq Runner.Listener.exe",
-      "/fo", "csv",
-      "/nh",
-    ]);
-    if (taskRes.exitCode === 0 && taskRes.stdout.includes("Runner.Listener.exe")) {
-      serviceRunning = true;
-      const match = taskRes.stdout.match(/"Runner\.Listener\.exe","(\d+)"/i);
-      if (match && match[1]) {
-        activePid = parseInt(match[1], 10);
-      }
-    } else {
-      const pidFile = path.join(DEFAULT_BASE_DIR, "runner.pid");
-      if (fs.existsSync(pidFile)) {
-        const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-        if (!isNaN(pid) && (await isPidAlive(pid))) {
+    const pidFile = getRunnerPidFile(runnerDir);
+    if (fs.existsSync(pidFile)) {
+      const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+      if (!isNaN(pid)) {
+        if (await verifyWindowsRunnerProcess(pid, runnerDir)) {
           serviceRunning = true;
           activePid = pid;
+        } else {
+          await fsPromises.unlink(pidFile).catch(() => {});
         }
       }
     }
@@ -478,7 +478,7 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
     runnerName: officialConfig?.runnerName || localMeta?.name,
     targetUrl: officialConfig?.serverUrl || localMeta?.url,
     labels: localMeta?.labels,
-    serviceInstalled: configured,
+    serviceInstalled: process.platform === "win32" ? false : configured,
     serviceRunning,
     activePid,
     mode: localMeta?.mode,
@@ -487,13 +487,19 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
   };
 }
 
-async function isPidAlive(pid: number): Promise<boolean> {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+async function verifyWindowsRunnerProcess(pid: number, runnerDir: string): Promise<boolean> {
+  const result = await execCommand("powershell.exe", ["-NoProfile", "-Command", [
+    "$p = Get-CimInstance Win32_Process -Filter \"ProcessId = $env:DGRUNNER_PID\"",
+    "if ($p -and $p.ExecutablePath -and ([IO.Path]::GetFullPath($p.ExecutablePath) -ieq [IO.Path]::GetFullPath($env:DGRUNNER_EXECUTABLE))) { exit 0 }",
+    "exit 2",
+  ].join("; ")], {
+    env: {
+      ...process.env,
+      DGRUNNER_PID: String(pid),
+      DGRUNNER_EXECUTABLE: path.join(runnerDir, "bin", "Runner.Listener.exe"),
+    },
+  });
+  return result.exitCode === 0;
 }
 
 export interface ActiveProcessInfo {
@@ -515,7 +521,11 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
     // Check if container is running; if not, restart it
     const status = await getDockerRunnerStatus(container);
     if (!status.running) {
-      await restartDockerRunner(container);
+      const started = await startDockerContainer(container);
+      if (!started.success) {
+        console.error(started.output);
+        return 1;
+      }
     }
     await tailDockerRunnerLogs(container, true);
     return 0;
@@ -567,6 +577,11 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
       process.off("SIGINT", cleanup);
       process.off("SIGTERM", cleanup);
       resolve(code ?? 0);
+    });
+    child.on("error", () => {
+      process.off("SIGINT", cleanup);
+      process.off("SIGTERM", cleanup);
+      resolve(1);
     });
   });
 }

@@ -1,6 +1,6 @@
 {
   "name": "@upstand/dgrunner",
-  "version": "1.0.3",
+  "version": "2.0.0",
   "description": "Clean, minimal, and secure self-hosted GitHub Actions runner CLI with Docker integration",
   "type": "module",
   "main": "./dist/index.js",
@@ -55,9 +55,12 @@
     "tsup": "^8.4.0",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3",
-    "vitest": "^3.0.7"
+    "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.14.0"
   }
 }

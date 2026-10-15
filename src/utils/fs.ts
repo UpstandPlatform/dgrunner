@@ -54,8 +54,21 @@ export async function extractArchive(archivePath: string, destDir: string): Prom
       const tarResult = await execCommand("tar", ["-xf", archivePath, "-C", destDir]);
       if (tarResult.exitCode !== 0) {
         // Fallback to PowerShell Expand-Archive
-        const psCmd = `Expand-Archive -LiteralPath '${archivePath}' -DestinationPath '${destDir}' -Force`;
-        const psResult = await execCommand("powershell", ["-NoProfile", "-Command", psCmd]);
+        const psResult = await execCommand(
+          "powershell",
+          [
+            "-NoProfile",
+            "-Command",
+            "Expand-Archive -LiteralPath $env:DGRUNNER_ARCHIVE_PATH -DestinationPath $env:DGRUNNER_DESTINATION_PATH -Force",
+          ],
+          {
+            env: {
+              ...process.env,
+              DGRUNNER_ARCHIVE_PATH: archivePath,
+              DGRUNNER_DESTINATION_PATH: destDir,
+            },
+          }
+        );
         if (psResult.exitCode !== 0) {
           throw new Error(`Failed to extract zip archive: ${psResult.stderr || psResult.stdout}`);
         }

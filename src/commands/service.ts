@@ -23,7 +23,7 @@ export function registerServiceCommands(program: Command): void {
         const exitCode = await runForeground(options.dir);
         process.exit(exitCode);
       } else {
-        logger.info("Starting runner service in background...");
+        logger.info("Starting runner in the background...");
         const res = await startService(options.dir);
         if (res.success) {
           logger.success(res.message);
@@ -53,7 +53,7 @@ export function registerServiceCommands(program: Command): void {
     .description("Stop the persistent runner background service")
     .option("-d, --dir <path>", "Runner directory", DEFAULT_RUNNER_DIR)
     .action(async (options) => {
-      logger.info("Stopping runner service...");
+      logger.info("Stopping runner...");
       const res = await stopService(options.dir);
       if (res.success) {
         logger.success(res.message);
@@ -73,7 +73,7 @@ export function registerServiceCommands(program: Command): void {
       await stopService(options.dir);
       const res = await startService(options.dir);
       if (res.success) {
-        logger.success("Runner service restarted successfully.");
+        logger.success("Runner restarted successfully.");
       } else {
         logger.error(res.message);
         process.exit(1);

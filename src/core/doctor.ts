@@ -79,7 +79,7 @@ export async function runDoctorChecks(
       name: "Operating System & Architecture",
       status: "fail",
       message: `Unsupported platform or architecture: ${platform} (${arch})`,
-      detail: "Official GitHub Actions runner binaries support Linux (x64/arm64) and Windows (x64).",
+      detail: "Official GitHub Actions runner binaries support Linux and Windows on the x64 and ARM64 architectures.",
     });
   }
 

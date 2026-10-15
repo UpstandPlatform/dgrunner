@@ -30,6 +30,7 @@ Built with TypeScript and [Commander](https://www.npmjs.com/package/commander).
 - [Verifying Your Runner on GitHub](#-verifying-your-runner-on-github)
 - [Platform-Specific Notes & Troubleshooting](#-platform-specific-notes--troubleshooting)
   - [Windows: Git Bash vs. WSL bash](#windows-git-bash-vs-wsl-bash)
+  - [Docker: Runner Tool Cache Permissions](#docker-runner-tool-cache-permissions)
   - [Linux: Rootless Docker Setup](#linux-rootless-docker-setup)
   - [Handling Session Conflicts](#handling-session-conflicts)
 - [CI/CD & npm Trusted Publishing](#-cicd--npm-trusted-publishing)
@@ -45,7 +46,7 @@ Self-hosting GitHub Actions runners gives you bare-metal speed, custom hardware/
 `dgrunner` solves this by automating:
 - **Pre-flight security audits** before any binary is installed.
 - **Automated package integrity verification** (SHA-256 validation against official GitHub releases).
-- **Persistent OS background service integration** across Linux and Windows.
+- **Linux system service and Windows background process management.**
 - **Docker integration** with rootless isolation checks.
 - **Automated verification workflows** to validate host, container, and security boundaries.
 
@@ -53,14 +54,14 @@ Self-hosting GitHub Actions runners gives you bare-metal speed, custom hardware/
 
 ## 🔒 Security Model & Guardrails
 
-GitHub explicitly advises against using self-hosted runners on public repositories because pull requests from public forks can execute arbitrary code on the runner machine. `dgrunner` enforces strict security boundaries:
+GitHub advises against using self-hosted runners on public repositories because pull requests from public forks can execute arbitrary code on the runner machine. `dgrunner` provides pre-flight checks and safe defaults; operators remain responsible for repository visibility and runner isolation:
 
-1. **Private Repositories & Internal Organizations Only**
-   - The CLI guides you exclusively through private repository and organization setup.
-2. **Unprivileged Execution**
-   - Refuses root execution on Linux (`UID 0`) and checks user isolation on Windows.
-3. **Rootless Docker Enforcement on Linux**
-   - Workflows with Docker access can easily compromise a host root filesystem if Docker runs in root mode. `dgrunner` audits and enforces rootless Docker (`dockerd-rootless-setuptool.sh`).
+1. **GitHub URL Validation**
+   - The CLI accepts GitHub.com and GitHub Enterprise Cloud URLs. It cannot determine whether a repository is private; only register runners for trusted repositories and organizations.
+2. **Unprivileged Execution Checks**
+   - Blocks setup when running as root on Linux unless the operator explicitly overrides pre-flight checks with `--force`; checks elevation on Windows.
+3. **Docker Security Checks**
+   - `dgrunner doctor` reports rootful Docker and unauthenticated remote TCP exposure. Checks may be overridden with `--force`; rootless Docker is recommended for Linux hosts.
 4. **Binary Tamper Protection (SHA-256)**
    - All runner binaries are downloaded directly from official GitHub releases and cryptographically verified against official SHA-256 checksums before extraction.
 5. **Ephemeral Secrets**
@@ -76,7 +77,7 @@ Before setting up a runner, ensure your system has:
 
 | Dependency | Minimum Version | Notes |
 | :--- | :--- | :--- |
-| **Node.js** | `>= 18.0.0` | Tested on Node.js 18, 20, 22, and 25 |
+| **Node.js** | `>= 22.14.0` | Node 22 LTS or Node 24 LTS recommended |
 | **Git** | `>= 2.25.0` | Required for checkout steps (Git for Windows on Windows) |
 | **Docker** | Engine / Desktop | Docker Desktop (Windows) or Rootless Docker (Linux) |
 | **Operating System** | Linux / Windows | Linux (`x64`, `arm64`) or Windows (`x64`) |
@@ -179,7 +180,7 @@ Follow the prompts:
 - Enter your repository URL (e.g. `https://github.com/owner/repo`).
 - Paste your short-lived registration token (hidden input).
 - Confirm the runner name and labels.
-- `dgrunner` will download the official runner, verify its SHA-256 hash, register it with GitHub, and launch the background service.
+- `dgrunner` will download the official runner, verify its SHA-256 hash, register it with GitHub, and start it. Linux installs a system service; Windows native mode starts a detached process that does not auto-start after sign-out or reboot.
 
 ### Step 4: Verify with an Automated Workflow
 Generate the ready-to-use verification workflow:
@@ -226,8 +227,8 @@ Full automated setup or scripted unattended setup via flags.
 
 When running `dgrunner setup` on Windows, you can choose between:
 
-1. **Windows Native (Host Service)** (Default)
-   - Runs natively on Windows host as a background service or foreground runner.
+1. **Windows Native** (Default)
+   - Runs natively on Windows host as a detached background process or foreground runner. It is not installed as a Windows service and does not auto-start after sign-out or reboot.
    - Ideal for PowerShell scripts, .NET builds, and Windows-specific pipelines.
 2. **Linux Container (via Docker)**
    - Spins up an authentic Linux runner inside Docker with your choice of distribution:
@@ -237,7 +238,7 @@ When running `dgrunner setup` on Windows, you can choose between:
      - **Custom Docker Image** (Any custom organization runner image via `--image`)
    - Distro labels (`ubuntu`, `ubuntu-24.04`, `ubuntu-22.04`, `debian`) are automatically injected into runner labels.
    - Runs genuine Linux/Bash jobs on your Windows machine with automatic restart (`--restart unless-stopped`).
-   - Seamlessly mounts `/var/run/docker.sock` so workflow steps can build and run Docker containers.
+   - Does not mount the host Docker socket by default. Use `--docker-socket` only when workflows need it; access to that socket can grant control of the Docker host.
    - Preserves build caches across runs in a dedicated volume (`dgrunner-linux-work`).
 3. **WSL2 Linux Environment**
    - Automatically detects all installed WSL distributions (`Ubuntu`, `Debian`, etc.) and allows selecting or installing a new distribution directly from Microsoft Store (`Ubuntu-24.04`, `Debian`, `kali-linux`, `archlinux`).
@@ -262,26 +263,26 @@ dgrunner setup --env docker --image my-org/custom-actions-runner:latest
 # Set up inside a specific WSL2 distro on Windows:
 dgrunner setup --env wsl --distro Ubuntu-24.04
 
-# Unattended Linux Container setup via Docker:
+# Unattended Linux Container setup via Docker (token may be prompted for interactively):
 dgrunner setup \
   --os linux \
   --distro ubuntu-24.04 \
   --url https://github.com/owner/repo \
-  --token <REGISTRATION_TOKEN> \
   --name my-pc-linux-docker
+# dgrunner prompts for the token using hidden input
 
 # Scripted Windows Native setup:
 dgrunner setup \
   --os windows \
   --url https://github.com/owner/repo \
-  --token <REGISTRATION_TOKEN> \
   --name my-workstation \
   --labels self-hosted,dgrunner,gpu
+# dgrunner prompts for the token using hidden input
 ```
 
 **Options:**
 - `-u, --url <url>`: Target GitHub repository or organization URL.
-- `-t, --token <token>`: GitHub Actions registration token.
+- `-t, --token <token>`: Optional GitHub Actions registration token. Prefer the hidden prompt to avoid shell history and process-list exposure.
 - `-n, --name <name>`: Custom runner name (defaults to `<hostname>-linux-docker` or `<hostname>-dgrunner`).
 - `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,linux,x64,docker,ubuntu-24.04`).
 - `-d, --dir <path>`: Runner installation directory (defaults to `~/.dgrunner/actions-runner`).
@@ -289,9 +290,9 @@ dgrunner setup \
 - `--env <env>`: Target environment: `windows`, `docker`, `wsl`, or `native`.
 - `--distro <distro>`: Linux distribution preset (`ubuntu-24.04`, `ubuntu-22.04`, `debian`) or WSL distro name.
 - `--image <image>`: Custom Docker runner container image (e.g. `ghcr.io/actions/actions-runner:latest`).
-- `--no-docker-socket`: For Docker mode, do not mount `/var/run/docker.sock` into the container.
+- `--docker-socket`: Explicitly mount `/var/run/docker.sock` into the container. Workflows can gain control over the Docker host through this socket.
 - `--force`: Bypass critical pre-flight failures at your own risk.
-- `--no-service`: Configure without immediately starting the persistent background service.
+- `--no-service`: Configure without immediately starting the runner. Windows mode is a background process, not an installed OS service.
 
 ---
 
@@ -546,6 +547,25 @@ If you want to run Linux runners on Windows, you have two great options:
    > **Docker Desktop Settings** ➔ **Resources** ➔ **WSL Integration** ➔ Enable integration for your distro (e.g. `Ubuntu`).
    > Run `dgrunner doctor` inside WSL to verify your connection.
 
+### Docker: Runner Tool Cache Permissions
+
+If a job fails with `UnauthorizedAccessException` or `Permission denied` for `/home/runner/_work/_tool`, the runner worker could not create its tool cache before normal workflow steps started. In Docker mode, this path is inside the runner container and backed by the `dgrunner-linux-work` named volume; it is not a VPS path.
+
+The official runner image runs as the unprivileged `runner` account. If Docker created the named volume as root, repair only the mounted work directory from the host:
+
+```bash
+docker exec --user root upstand-dgrunner-linux chown -R runner:runner /home/runner/_work
+docker exec --user root upstand-dgrunner-linux install -d -o runner -g runner -m 0755 /home/runner/_work/_tool
+```
+
+Then verify the runner account can write there:
+
+```bash
+docker exec --user runner upstand-dgrunner-linux sh -lc 'test -w /home/runner/_work && test -w /home/runner/_work/_tool && echo writable'
+```
+
+Current dgrunner startup repairs ownership of a newly initialized work volume with that same account-scoped ownership change. Later `TaskCanceledException` broker messages can follow a failed job as the runner disconnects and retries; they do not explain the earlier `_tool` permission denial.
+
 ### Linux: Rootless Docker Setup
 
 To prevent workflow containers from accessing the host root filesystem, install Rootless Docker:
@@ -579,13 +599,13 @@ This is expected behavior from GitHub Actions. The runner will automatically ret
 `@upstand/dgrunner` comes with pre-configured GitHub Actions workflows implementing **npm Trusted Publishing (OIDC)** and cryptographic package provenance:
 
 - **Continuous Integration ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))**:
-  - Runs on every push and PR across **Ubuntu** and **Windows** on Node.js **18.x, 20.x, and 22.x**.
+  - Runs on every push and PR across **Ubuntu** and **Windows** on Node.js **22.x and 24.x**.
   - Enforces strict typechecks, unit tests, bundle builds, and npm package integrity validation (`npm pack --dry-run`).
 
 - **Automated Release & Publishing ([`.github/workflows/release.yml`](.github/workflows/release.yml))**:
-  - Triggers automatically when a new semver git tag is pushed (e.g. `git tag v1.0.1 && git push origin v1.0.1`).
-  - Publishes directly to npm with `--access public --provenance` using OpenID Connect (OIDC) without requiring static secret tokens.
-  - Automatically drafts a GitHub Release with full release notes and binary artifacts.
+  - Triggers when a matching semver git tag is pushed (for example, `v2.0.0`).
+  - Tests and builds the package before a separate least-privilege npm OIDC publish job publishes the verified tarball with provenance. No static npm token is used.
+  - Creates the GitHub Release only after npm publishing succeeds and attaches the package tarball.
 
 ### Setting up npm Trusted Publisher (OIDC)
 
@@ -594,7 +614,7 @@ To configure npm to publish without static tokens:
 2. Go to package `@upstand/dgrunner` (or create it under `@upstand`).
 3. Click **Settings** ➔ **Publishing Access** ➔ **Add Publishing Access** ➔ **GitHub Actions**.
 4. Set the repository name (`UpstandPlatform/dgrunner`) and specify the workflow file name (`release.yml`).
-5. Now, pushing any tag (e.g. `v1.0.0`) publishes cryptographically signed packages with provenance to npm automatically!
+5. The release workflow checks that the pushed tag matches `package.json`, then publishes the verified package with provenance.
 
 ---
 

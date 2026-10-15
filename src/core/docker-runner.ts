@@ -113,7 +113,15 @@ export async function startDockerRunner(
   // Check if container already exists and remove it to prevent conflicts
   const status = await getDockerRunnerStatus(containerName);
   if (status.exists) {
-    await execCommand("docker", ["rm", "-f", containerName]);
+    const removeExisting = await execCommand("docker", ["rm", "-f", containerName], {
+      timeoutMs: 30000,
+    });
+    if (removeExisting.exitCode !== 0) {
+      return {
+        success: false,
+        output: `${removeExisting.stdout}\n${removeExisting.stderr}`.trim(),
+      };
+    }
   }
 
   const dockerArgs: string[] = [
@@ -123,7 +131,7 @@ export async function startDockerRunner(
     "--restart", "unless-stopped",
   ];
 
-  if (options.mountDockerSocket !== false) {
+  if (options.mountDockerSocket === true) {
     dockerArgs.push("-v", "/var/run/docker.sock:/var/run/docker.sock");
     dockerArgs.push("-e", "DOCKER_HOST=unix:///var/run/docker.sock");
   }
@@ -131,11 +139,22 @@ export async function startDockerRunner(
   // Work volume to preserve build workspace cache across container restarts
   dockerArgs.push("-v", "dgrunner-linux-work:/home/runner/_work");
 
-  // Command executed inside the container:
-  // 1. Ensure docker.sock permissions so workflows can run docker commands without root
-  // 2. Configure runner if .runner doesn't exist
-  // 3. Start run.sh (so restarts resume cleanly even after registration token expires)
-  const runnerScript = `sudo chmod 666 /var/run/docker.sock 2>/dev/null || true; if [ ! -f .runner ]; then ./config.sh --url "${options.url}" --token "${options.token}" --name "${runnerName}" --labels "${labelsStr}" --unattended --replace; fi && ./run.sh`;
+  // Named volumes are mounted root-owned by Docker. Repair ownership once so the
+  // runner UID can create its tool cache and workspace without broad permissions.
+  const runnerScript = [
+    "set -eu",
+    'expected_owner="$(id -u):$(id -g)"',
+    'owner_file=/home/runner/_work/.dgrunner-owner',
+    'if [ ! -d /home/runner/_work ]; then if [ "$(id -u)" = "0" ]; then mkdir -p /home/runner/_work; else sudo install -d -o "$(id -u)" -g "$(id -g)" /home/runner/_work; fi; fi',
+    'if [ "$(cat "$owner_file" 2>/dev/null || true)" != "$expected_owner" ] || [ ! -w /home/runner/_work ] || [ ! -w /home/runner/_work/_tool ]; then',
+    '  if [ "$(id -u)" = "0" ]; then chown -R "$expected_owner" /home/runner/_work; else sudo chown -R "$expected_owner" /home/runner/_work; fi',
+    '  printf "%s\\n" "$expected_owner" > "$owner_file"',
+    "fi",
+    'mkdir -p /home/runner/_work/_tool',
+    'if [ ! -w /home/runner/_work ] || [ ! -w /home/runner/_work/_tool ]; then echo "Runner work volume is not writable by $(id -u):$(id -g)." >&2; exit 1; fi',
+    'while [ ! -f .runner ]; do sleep 1; done',
+    "exec ./run.sh",
+  ].join("\n");
 
   dockerArgs.push(
     "--entrypoint", "/bin/bash",
@@ -144,33 +163,59 @@ export async function startDockerRunner(
     runnerScript
   );
 
-  const res = await execCommand("docker", dockerArgs, {
+  const launch = await execCommand("docker", dockerArgs, {
     timeoutMs: 60000,
   });
 
-  const success = res.exitCode === 0;
-
-  if (success) {
-    const scope = options.url.split("/").filter(Boolean).length === 4 ? "repo" : "org";
-    await saveLocalMetadata({
-      runnerDir: `docker:${containerName}`,
-      url: options.url,
-      name: runnerName,
-      labels,
-      scope,
-      configuredAt: new Date().toISOString(),
-      os: "linux",
-      arch: "x64",
-      mode: "docker",
-      containerName,
-      distro,
-      image,
-    });
+  if (launch.exitCode !== 0) {
+    return {
+      success: false,
+      output: `${launch.stdout}\n${launch.stderr}`.trim(),
+    };
   }
 
+  // Send the short-lived token over stdin. It is not stored in container config,
+  // environment variables, or the docker command line.
+  const configureScript = [
+    'IFS= read -r runner_token || exit 1',
+    './config.sh --url "$1" --token "$runner_token" --name "$2" --labels "$3" --unattended --replace',
+  ].join("\n");
+  const configure = await execCommand(
+    "docker",
+    ["exec", "-i", containerName, "/bin/bash", "-c", configureScript, "dgrunner", options.url, runnerName, labelsStr],
+    {
+      input: `${options.token}\n`,
+      timeoutMs: 60000,
+    }
+  );
+
+  if (configure.exitCode !== 0) {
+    await execCommand("docker", ["rm", "-f", containerName], { timeoutMs: 30000 });
+    return {
+      success: false,
+      output: `${configure.stdout}\n${configure.stderr}`.trim(),
+    };
+  }
+
+  const scope = options.url.split("/").filter(Boolean).length === 4 ? "repo" : "org";
+  await saveLocalMetadata({
+    runnerDir: `docker:${containerName}`,
+    url: options.url,
+    name: runnerName,
+    labels,
+    scope,
+    configuredAt: new Date().toISOString(),
+    os: "linux",
+    arch: process.arch,
+    mode: "docker",
+    containerName,
+    distro,
+    image,
+  });
+
   return {
-    success,
-    output: `${res.stdout}\n${res.stderr}`.trim(),
+    success: true,
+    output: `${launch.stdout}\n${configure.stdout}\n${configure.stderr}`.trim(),
   };
 }
 
@@ -180,7 +225,24 @@ export async function startDockerRunner(
 export async function stopDockerRunner(
   containerName = DEFAULT_CONTAINER_NAME
 ): Promise<{ success: boolean; output: string }> {
+  const status = await getDockerRunnerStatus(containerName);
+  if (!status.exists) return { success: false, output: `Docker runner container '${containerName}' was not found.` };
+  if (!status.running) return { success: true, output: "Docker runner container is already stopped." };
   const res = await execCommand("docker", ["stop", containerName]);
+  return {
+    success: res.exitCode === 0,
+    output: `${res.stdout}\n${res.stderr}`.trim(),
+  };
+}
+
+/** Starts a stopped Docker runner without interrupting one that is already active. */
+export async function startDockerContainer(
+  containerName = DEFAULT_CONTAINER_NAME
+): Promise<{ success: boolean; output: string }> {
+  const status = await getDockerRunnerStatus(containerName);
+  if (!status.exists) return { success: false, output: `Docker runner container '${containerName}' was not found.` };
+  if (status.running) return { success: true, output: "Docker runner container is already running." };
+  const res = await execCommand("docker", ["start", containerName], { timeoutMs: 30000 });
   return {
     success: res.exitCode === 0,
     output: `${res.stdout}\n${res.stderr}`.trim(),
@@ -204,12 +266,37 @@ export async function restartDockerRunner(
  * Force removes the Docker runner container.
  */
 export async function removeDockerRunner(
+  token: string,
   containerName = DEFAULT_CONTAINER_NAME
 ): Promise<{ success: boolean; output: string }> {
-  const res = await execCommand("docker", ["rm", "-f", containerName]);
+  const status = await getDockerRunnerStatus(containerName);
+  if (!status.exists) {
+    return { success: false, output: `Docker runner container '${containerName}' was not found.` };
+  }
+
+  if (!status.running) {
+    const start = await execCommand("docker", ["start", containerName], { timeoutMs: 30000 });
+    if (start.exitCode !== 0) {
+      return { success: false, output: `${start.stdout}\n${start.stderr}`.trim() };
+    }
+  }
+
+  const unregister = await execCommand(
+    "docker",
+    ["exec", "-i", containerName, "/bin/bash", "-c", 'IFS= read -r runner_token || exit 1; ./config.sh remove --token "$runner_token"'],
+    { input: `${token}\n`, timeoutMs: 30000 }
+  );
+  if (unregister.exitCode !== 0) {
+    return {
+      success: false,
+      output: `${unregister.stdout}\n${unregister.stderr}`.trim(),
+    };
+  }
+
+  const res = await execCommand("docker", ["rm", "-f", containerName], { timeoutMs: 30000 });
   return {
     success: res.exitCode === 0,
-    output: `${res.stdout}\n${res.stderr}`.trim(),
+    output: `${unregister.stdout}\n${res.stdout}\n${res.stderr}`.trim(),
   };
 }
 

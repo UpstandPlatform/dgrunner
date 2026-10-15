@@ -28,26 +28,45 @@ export interface UpgradeResult {
  *   0 if v1 === v2
  */
 export function compareSemver(v1: string, v2: string): number {
-  const clean = (v: string) => v.replace(/^v/, "").trim();
-  const [p1, pre1] = clean(v1).split("-");
-  const [p2, pre2] = clean(v2).split("-");
+  const parse = (version: string) => {
+    const match = version.trim().match(
+      /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
+    );
+    if (!match) return null;
+    return {
+      core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+      prerelease: match[4]?.split(".") ?? null,
+    };
+  };
 
-  const parts1 = p1.split(".").map((n) => parseInt(n, 10) || 0);
-  const parts2 = p2.split(".").map((n) => parseInt(n, 10) || 0);
+  const left = parse(v1);
+  const right = parse(v2);
+  if (!left || !right) return 0;
 
-  for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-    const num1 = parts1[i] ?? 0;
-    const num2 = parts2[i] ?? 0;
-    if (num1 > num2) return 1;
-    if (num1 < num2) return -1;
+  for (let index = 0; index < 3; index++) {
+    if (left.core[index] > right.core[index]) return 1;
+    if (left.core[index] < right.core[index]) return -1;
   }
 
-  // Pre-release versions have lower precedence than normal releases (e.g. 1.0.0-beta < 1.0.0)
-  if (!pre1 && pre2) return 1;
-  if (pre1 && !pre2) return -1;
-  if (pre1 && pre2) return pre1.localeCompare(pre2);
+  if (!left.prerelease && right.prerelease) return 1;
+  if (left.prerelease && !right.prerelease) return -1;
+  if (!left.prerelease || !right.prerelease) return 0;
 
-  return 0;
+  for (let index = 0; index < Math.min(left.prerelease.length, right.prerelease.length); index++) {
+    const a = left.prerelease[index];
+    const b = right.prerelease[index];
+    if (a === b) continue;
+
+    const aNumeric = /^\d+$/.test(a);
+    const bNumeric = /^\d+$/.test(b);
+    if (aNumeric && bNumeric) return BigInt(a) > BigInt(b) ? 1 : -1;
+    if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+    return a > b ? 1 : -1;
+  }
+
+  return left.prerelease.length === right.prerelease.length
+    ? 0
+    : left.prerelease.length > right.prerelease.length ? 1 : -1;
 }
 
 /**

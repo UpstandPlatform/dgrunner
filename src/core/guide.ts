@@ -25,7 +25,7 @@ export function printGitHubSetupGuide(scope?: "repo" | "org"): void {
     console.log(`    b. Click ${pc.bold("Settings")} -> ${pc.bold("Actions")} -> ${pc.bold("Runners")}.`);
     console.log(`    c. Click the green ${pc.bold("New self-hosted runner")} button.`);
     console.log(`    d. Select your Operating System (Linux or Windows).`);
-    console.log(`    e. Under ${pc.italic('"Configure"')}, copy the token following ${pc.cyan("--token <TOKEN>")}.`);
+    console.log(`    e. Generate a short-lived token, then paste it into dgrunner's hidden prompt. Avoid putting the token in a shell command.`);
     console.log();
   }
 
@@ -108,6 +108,10 @@ jobs:
       - name: Test Docker CLI & Daemon
         shell: bash
         run: |
+          if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+            echo "Docker socket is not enabled for this runner; skipping optional Docker checks."
+            exit 0
+          fi
           echo "Checking Docker version..."
           docker --version
           echo "Running lightweight test container..."
@@ -130,6 +134,10 @@ jobs:
       - name: Test Docker User Namespace / Isolation
         shell: bash
         run: |
+          if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+            echo "Docker socket is not enabled for this runner; skipping optional Docker checks."
+            exit 0
+          fi
           docker run --rm alpine:latest id
           echo "Docker container isolation verified."
 `;

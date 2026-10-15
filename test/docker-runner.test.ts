@@ -1,4 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import { startDockerRunner } from "../src/core/docker-runner.js";
+
+const { execCommandMock, saveMetadataMock } = vi.hoisted(() => ({
+  execCommandMock: vi.fn(),
+  saveMetadataMock: vi.fn(),
+}));
+
+vi.mock("../src/utils/exec.js", () => ({
+  execCommand: execCommandMock,
+  execInteractive: vi.fn(),
+}));
+
+vi.mock("../src/core/runner-manager.js", () => ({
+  saveLocalMetadata: saveMetadataMock,
+}));
 import {
   DEFAULT_CONTAINER_NAME,
   DEFAULT_DOCKER_RUNNER_IMAGE,
@@ -7,6 +22,11 @@ import {
 } from "../src/core/docker-runner.js";
 
 describe("Docker Runner Module", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    saveMetadataMock.mockResolvedValue(undefined);
+  });
+
   it("should have official runner image and container defaults", () => {
     expect(DEFAULT_CONTAINER_NAME).toBe("upstand-dgrunner-linux");
     expect(DEFAULT_DOCKER_RUNNER_IMAGE).toBe("ghcr.io/actions/actions-runner:latest");
@@ -30,11 +50,57 @@ describe("Docker Runner Module", () => {
   });
 
   it("should query container status safely when container does not exist", async () => {
+    execCommandMock.mockResolvedValue({ exitCode: 1, stdout: "", stderr: "not found" });
     const status = await getDockerRunnerStatus("non-existent-test-runner-container-999");
     expect(status).toBeDefined();
     expect(status.exists).toBe(false);
     expect(status.running).toBe(false);
     expect(status.status).toBe("Not Created");
+  });
+
+  it("does not mount the host Docker socket or expose the registration token by default", async () => {
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "not found" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "container-id", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "configured", stderr: "" });
+    const token = "runner-token-value-123456";
+
+    const result = await startDockerRunner({
+      containerName: "test-runner",
+      url: "https://github.com/example/repo",
+      token,
+      runnerName: "test-runner",
+      labels: ["self-hosted", "linux"],
+    });
+
+    expect(result.success).toBe(true);
+    const runCall = execCommandMock.mock.calls.find((call) => call[1]?.[0] === "run");
+    const configureCall = execCommandMock.mock.calls.find((call) => call[1]?.[0] === "exec");
+    expect(runCall).toBeDefined();
+    expect(runCall?.[1]).not.toContain("/var/run/docker.sock:/var/run/docker.sock");
+    expect(runCall?.[1]).not.toContain(token);
+    expect(runCall?.[1]?.join(" ")).toContain("chown -R");
+    expect(runCall?.[1]?.join(" ")).toContain("/home/runner/_work/_tool");
+    expect(configureCall?.[1]).not.toContain(token);
+    expect(configureCall?.[2]).toMatchObject({ input: `${token}\n` });
+  });
+
+  it("mounts the host Docker socket only when explicitly requested", async () => {
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "not found" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "container-id", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "configured", stderr: "" });
+
+    const result = await startDockerRunner({
+      containerName: "test-runner",
+      url: "https://github.com/example/repo",
+      token: "runner-token-value-123456",
+      mountDockerSocket: true,
+    });
+
+    expect(result.success).toBe(true);
+    const runCall = execCommandMock.mock.calls.find((call) => call[1]?.[0] === "run");
+    expect(runCall?.[1]).toContain("/var/run/docker.sock:/var/run/docker.sock");
   });
 });
 

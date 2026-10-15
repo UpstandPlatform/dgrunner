@@ -1,4 +1,5 @@
 import os from "node:os";
+import net from "node:net";
 import { execCommand } from "../utils/exec.js";
 
 export interface DockerSecurityStatus {
@@ -33,10 +34,7 @@ export async function isSuperUser(): Promise<boolean> {
 export async function inspectDockerSecurity(): Promise<DockerSecurityStatus> {
   // Check DOCKER_HOST for insecure remote TCP
   const dockerHost = process.env.DOCKER_HOST || "";
-  const insecureTcpSocket =
-    dockerHost.startsWith("tcp://") &&
-    !dockerHost.includes("127.0.0.1") &&
-    !dockerHost.includes("localhost");
+  const insecureTcpSocket = isInsecureRemoteDockerHost(dockerHost, process.env.DOCKER_TLS_VERIFY);
 
   const result = await execCommand("docker", ["info", "--format", "{{json .}}"], {
     timeoutMs: 8000,
@@ -83,6 +81,26 @@ export async function inspectDockerSecurity(): Promise<DockerSecurityStatus> {
   }
 }
 
+export function isInsecureRemoteDockerHost(dockerHost: string, tlsVerify?: string): boolean {
+  if (!dockerHost.toLowerCase().startsWith("tcp://")) return false;
+  if (tlsVerify === "1") return false;
+
+  try {
+    const rawHost = new URL(dockerHost).hostname.toLowerCase();
+    const host = rawHost.startsWith("[") && rawHost.endsWith("]")
+      ? rawHost.slice(1, -1)
+      : rawHost;
+    const isLoopbackName = host === "localhost" || host.endsWith(".localhost");
+    const ipVersion = net.isIP(host);
+    const isLoopbackIp = ipVersion === 4
+      ? Number(host.split(".")[0]) === 127
+      : ipVersion === 6 && (host === "::1" || host === "0:0:0:0:0:0:0:1");
+    return !isLoopbackName && !isLoopbackIp;
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Validates that a GitHub repository or organization URL is well-formed.
  */
@@ -103,11 +121,29 @@ export function validateGitHubUrl(url: string): { valid: boolean; scope?: "repo"
     return { valid: false, error: "Only HTTPS GitHub URLs are allowed for security." };
   }
 
-  if (parsed.hostname !== "github.com" && !parsed.hostname.endsWith(".ghe.com")) {
-    return { valid: false, error: "URL host must be github.com (or GitHub Enterprise Server)." };
+  if (parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash) {
+    return { valid: false, error: "GitHub URL must not contain credentials, a port, query, or fragment." };
   }
 
-  const segments = parsed.pathname.split("/").filter(Boolean);
+  const rawPath = trimmed.match(/^https:\/\/[^/?#]+([^?#]*)/i)?.[1] || "";
+  const rawSegments = rawPath.split("/").slice(1);
+  const pathSegments = rawSegments.at(-1) === "" ? rawSegments.slice(0, -1) : rawSegments;
+  if (pathSegments.some((segment) =>
+    !/^[A-Za-z0-9_.-]+$/.test(segment) || segment === "." || segment === ".."
+  )) {
+    return { valid: false, error: "GitHub URL contains an invalid owner or repository name." };
+  }
+
+  if (parsed.hostname !== "github.com" && !parsed.hostname.endsWith(".ghe.com")) {
+    return { valid: false, error: "URL host must be github.com or a GitHub Enterprise Cloud *.ghe.com host." };
+  }
+
+  const path = parsed.pathname.endsWith("/") ? parsed.pathname.slice(0, -1) : parsed.pathname;
+  const segments = path.split("/").slice(1);
+  if (segments.some((segment) => !/^[A-Za-z0-9_.-]+$/.test(segment) || segment === "." || segment === "..")) {
+    return { valid: false, error: "GitHub URL contains an invalid owner or repository name." };
+  }
+
   if (segments.length === 1) {
     return { valid: true, scope: "org" };
   } else if (segments.length === 2) {

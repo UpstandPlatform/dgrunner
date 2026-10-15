@@ -24,11 +24,12 @@ export function registerUpgradeCommand(program: Command): void {
         }
       }
 
-      await runUpgrade({
+      const result = await runUpgrade({
         checkOnly: options.check,
         force: options.force,
         tag: options.tag,
         packageManager: pm,
       });
+      if (result.error) process.exitCode = 1;
     });
 }

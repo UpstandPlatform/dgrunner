@@ -1,68 +1,113 @@
-name: Release & Publish to npm
+name: Release and publish to npm
 
 on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: 'Tag / Release version (e.g. v1.0.0)'
-        required: false
-        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  build-and-publish:
-    name: Build, Verify & Publish
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write   # Required to create GitHub Release
-      id-token: write   # CRITICAL: Required for npm Trusted Publishing (OIDC) & provenance attestations
-
+  verify:
+    name: Verify on ${{ matrix.os }} (Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: [22.x, 24.x]
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Checkout tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.1
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js (v22)
-        uses: actions/setup-node@v4
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@249970729cb0ef3589644e289664e5dc5ba9c38 # v6.0.0
         with:
-          node-version: 22.x
-          cache: 'npm'
+          node-version: ${{ matrix.node-version }}
+          cache: npm
 
-      - name: Upgrade npm to latest (Required for OIDC Trusted Publishing)
-        run: npm install -g npm@latest
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "v$package_version"
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: npm ci
 
-      - name: Strict Typecheck
-        run: npm run typecheck
+      - name: Check dependency security
+        run: npm audit
 
-      - name: Run Unit Tests
-        run: npm test
-
-      - name: Build Production Distribution
-        run: npm run build
-
-      - name: Verify Package Contents
-        run: npm pack --dry-run
-
-      - name: Ensure clean .npmrc for OIDC Trusted Publishing
+      - name: Typecheck, test, and build
         run: |
-          rm -f ~/.npmrc .npmrc "$NPM_CONFIG_USERCONFIG"
-          if [ -n "${{ secrets.NPM_TOKEN }}" ]; then
-            echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
-          fi
+          npm run typecheck
+          npm test
+          npm run build
+          node scripts/verify-package-version.mjs
 
-      - name: Publish to npm (Trusted Publishing / Provenance)
-        run: npm publish --access public --provenance
+      - name: Validate package contents
+        run: npm pack --dry-run --ignore-scripts
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Pack release artifact
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
+        run: npm pack --ignore-scripts --pack-destination release
+
+      - name: Upload verified npm package
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24.x'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          generate_release_notes: true
-          files: |
-            dist/index.js
+          name: npm-package
+          path: release/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish verified package to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Setup Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e289664e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.x
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.7.0
+
+      - name: Download verified npm package
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: npm-package
+          path: release
+
+      - name: Publish to npm using OIDC
+        run: npm publish release/*.tgz --access public --provenance --ignore-scripts
+
+  github-release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified npm package
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: npm-package
+          path: release
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME" release/*.tgz --repo "$GITHUB_REPOSITORY"

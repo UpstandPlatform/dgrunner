@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import pc from "picocolors";
 import { password, confirm } from "@inquirer/prompts";
-import { removeRunner, isRunnerConfigured } from "../core/runner-manager.js";
+import { removeRunner, isRunnerConfigured, readLocalMetadata } from "../core/runner-manager.js";
 import { validateRegistrationToken } from "../core/security.js";
 import { logger } from "../utils/logger.js";
 import { DEFAULT_RUNNER_DIR } from "../config/constants.js";
@@ -16,7 +16,9 @@ export function registerRemoveCommand(program: Command): void {
     .action(async (options) => {
       logger.header("Remove GitHub Actions Runner");
 
-      if (!isRunnerConfigured(options.dir)) {
+      const metadata = await readLocalMetadata();
+      const configured = metadata?.mode === "docker" || isRunnerConfigured(options.dir);
+      if (!configured) {
         logger.warn(`No configured runner found in ${options.dir}. Nothing to remove.`);
         return;
       }
@@ -35,6 +37,12 @@ export function registerRemoveCommand(program: Command): void {
             return res.valid ? true : res.error || "Invalid token";
           },
         });
+      }
+
+      const tokenValidation = validateRegistrationToken(token);
+      if (!tokenValidation.valid) {
+        logger.error(`Invalid removal token: ${tokenValidation.error}`);
+        process.exit(1);
       }
 
       if (!options.yes) {

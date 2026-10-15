@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   compareSemver,
   getUpgradeCommand,
@@ -30,6 +30,10 @@ describe("Updater Module", () => {
     it("should handle pre-release tags properly", () => {
       expect(compareSemver("1.0.0", "1.0.0-beta.1")).toBe(1);
       expect(compareSemver("1.0.0-beta.1", "1.0.0")).toBe(-1);
+      expect(compareSemver("1.0.0-beta.10", "1.0.0-beta.2")).toBe(1);
+      expect(compareSemver("1.0.0-beta.2", "1.0.0-beta.10")).toBe(-1);
+      expect(compareSemver("1.0.0-beta", "1.0.0-beta.1")).toBe(-1);
+      expect(compareSemver("1.0.0+build.2", "1.0.0+build.1")).toBe(0);
     });
   });
 
@@ -73,10 +77,19 @@ describe("Updater Module", () => {
   });
 
   describe("fetchLatestVersion", () => {
-    it("should fetch latest version from npm registry or fallback", async () => {
-      const ver = await fetchLatestVersion("latest");
-      if (ver) {
-        expect(ver).toMatch(/^\d+\.\d+\.\d+/);
+    it("should read the selected npm dist-tag without requiring a network call", async () => {
+      const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ version: "2.1.0" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      try {
+        await expect(fetchLatestVersion("latest")).resolves.toBe("2.1.0");
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(String(fetchMock.mock.calls[0]?.[0])).toContain("registry.npmjs.org/@upstand/dgrunner/latest");
+      } finally {
+        vi.unstubAllGlobals();
       }
     });
   });
