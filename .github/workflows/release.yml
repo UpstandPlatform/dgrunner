@@ -95,7 +95,7 @@ jobs:
           path: release
 
       - name: Publish to npm using OIDC
-        run: npm publish release/*.tgz --access public --provenance --ignore-scripts
+        run: npm publish ./release/*.tgz --access public --provenance --ignore-scripts
 
   github-release:
     name: Create GitHub release
