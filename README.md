@@ -21,6 +21,10 @@ Built with TypeScript and [Commander](https://www.npmjs.com/package/commander).
   - [`dgrunner setup`](#dgrunner-setup)
   - [`dgrunner status`](#dgrunner-status)
   - [`dgrunner start` / `stop` / `restart`](#dgrunner-start--stop--restart)
+  - [`dgrunner run` (Foreground Attached Mode)](#dgrunner-run-foreground-attached-mode)
+  - [`dgrunner ps` / `list`](#dgrunner-ps--list-active-process-inspector)
+  - [`dgrunner logs` / `attach`](#dgrunner-logs--attach-live-log-streaming)
+  - [`dgrunner upgrade` / `update`](#dgrunner-upgrade--update-self-upgrade)
   - [`dgrunner remove`](#dgrunner-remove)
   - [`dgrunner guide`](#dgrunner-guide)
 - [Verifying Your Runner on GitHub](#-verifying-your-runner-on-github)
@@ -358,6 +362,37 @@ dgrunner logs --follow
 # View last 100 lines and follow
 dgrunner logs -n 100 -f
 ```
+
+---
+
+### `dgrunner upgrade` / `update` (Self-Upgrade)
+Automatically checks the npm registry for the latest stable release and upgrades `@upstand/dgrunner`:
+
+```bash
+# Upgrade to the latest stable release
+dgrunner upgrade
+
+# Using alias 'update'
+dgrunner update
+
+# Check for available updates without installing
+dgrunner upgrade --check
+
+# Force re-installation of the latest version
+dgrunner upgrade --force
+
+# Upgrade to a specific distribution tag (e.g. beta / next)
+dgrunner upgrade --tag beta
+
+# Specify package manager (auto-detected by default)
+dgrunner upgrade --package-manager pnpm
+```
+
+**Options:**
+- `-c, --check`: Check for available updates without installing.
+- `-f, --force`: Force re-installation even if already on the latest version.
+- `-t, --tag <tag>`: Specify distribution tag (default: `latest`).
+- `--package-manager <pm>`: Override package manager (`npm`, `pnpm`, `yarn`, `bun`).
 
 ---
 

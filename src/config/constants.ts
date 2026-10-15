@@ -4,6 +4,8 @@ import os from "node:os";
 export const APP_NAME = "dgrunner";
 export const APP_VERSION = "1.0.0";
 export const APP_DESCRIPTION = "Secure self-hosted GitHub Actions runner CLI with Docker";
+export const NPM_PACKAGE_NAME = "@upstand/dgrunner";
+export const NPM_REGISTRY_URL = "https://registry.npmjs.org/@upstand/dgrunner";
 
 export const DEFAULT_BASE_DIR = path.join(os.homedir(), ".dgrunner");
 export const DEFAULT_RUNNER_DIR = path.join(DEFAULT_BASE_DIR, "actions-runner");
