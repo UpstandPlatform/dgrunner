@@ -222,7 +222,7 @@ dgrunner doctor --dir ~/runner  # Check specific installation path
 ### `dgrunner setup`
 Full automated setup or scripted unattended setup via flags.
 
-#### 🌐 Target Runner Environments
+#### 🌐 Target Runner Environments & Distro Selection
 
 When running `dgrunner setup` on Windows, you can choose between:
 
@@ -230,26 +230,42 @@ When running `dgrunner setup` on Windows, you can choose between:
    - Runs natively on Windows host as a background service or foreground runner.
    - Ideal for PowerShell scripts, .NET builds, and Windows-specific pipelines.
 2. **Linux Container (via Docker)**
-   - Spins up an authentic Linux runner inside Docker (`ghcr.io/actions/actions-runner:latest`).
+   - Spins up an authentic Linux runner inside Docker with your choice of distribution:
+     - **Ubuntu 24.04 LTS (Noble)** (Default / Recommended - `ghcr.io/actions/actions-runner:latest`)
+     - **Ubuntu 22.04 LTS (Jammy)** (`ghcr.io/actions/actions-runner:2.316.0`)
+     - **Debian (Bookworm compatible)** (`ghcr.io/actions/actions-runner:latest`)
+     - **Custom Docker Image** (Any custom organization runner image via `--image`)
+   - Distro labels (`ubuntu`, `ubuntu-24.04`, `ubuntu-22.04`, `debian`) are automatically injected into runner labels.
    - Runs genuine Linux/Bash jobs on your Windows machine with automatic restart (`--restart unless-stopped`).
    - Seamlessly mounts `/var/run/docker.sock` so workflow steps can build and run Docker containers.
    - Preserves build caches across runs in a dedicated volume (`dgrunner-linux-work`).
 3. **WSL2 Linux Environment**
-   - Runs natively inside Windows Subsystem for Linux (Ubuntu / Debian).
-   - `dgrunner` can automatically transfer setup to your WSL2 distro or guide you step-by-step.
+   - Automatically detects all installed WSL distributions (`Ubuntu`, `Debian`, etc.) and allows selecting or installing a new distribution directly from Microsoft Store (`Ubuntu-24.04`, `Debian`, `kali-linux`, `archlinux`).
+   - Dynamically identifies distribution details from `/etc/os-release` and tags labels accordingly.
+   - `dgrunner` can automatically transfer setup to your selected WSL2 distro or guide you step-by-step.
 
 #### 💻 Usage Examples
 
 ```bash
-# Interactive wizard (prompts for target environment, repository, and token)
+# Interactive wizard (prompts for target environment, Linux distro, repository, and token)
 dgrunner setup
 
-# Set up a Linux runner container via Docker on Windows:
-dgrunner setup --os linux
+# Set up a Linux runner container via Docker with Ubuntu 24.04 LTS:
+dgrunner setup --os linux --distro ubuntu-24.04
+
+# Set up a Linux runner container with Ubuntu 22.04 LTS (Jammy):
+dgrunner setup --env docker --distro ubuntu-22.04
+
+# Set up a Docker runner with a custom runner image:
+dgrunner setup --env docker --image my-org/custom-actions-runner:latest
+
+# Set up inside a specific WSL2 distro on Windows:
+dgrunner setup --env wsl --distro Ubuntu-24.04
 
 # Unattended Linux Container setup via Docker:
 dgrunner setup \
   --os linux \
+  --distro ubuntu-24.04 \
   --url https://github.com/owner/repo \
   --token <REGISTRATION_TOKEN> \
   --name my-pc-linux-docker
@@ -267,10 +283,12 @@ dgrunner setup \
 - `-u, --url <url>`: Target GitHub repository or organization URL.
 - `-t, --token <token>`: GitHub Actions registration token.
 - `-n, --name <name>`: Custom runner name (defaults to `<hostname>-linux-docker` or `<hostname>-dgrunner`).
-- `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,linux,x64,docker`).
+- `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,linux,x64,docker,ubuntu-24.04`).
 - `-d, --dir <path>`: Runner installation directory (defaults to `~/.dgrunner/actions-runner`).
 - `--os <os>`: Target runner OS: `windows` or `linux` (on Windows, `linux` launches Docker container mode).
 - `--env <env>`: Target environment: `windows`, `docker`, `wsl`, or `native`.
+- `--distro <distro>`: Linux distribution preset (`ubuntu-24.04`, `ubuntu-22.04`, `debian`) or WSL distro name.
+- `--image <image>`: Custom Docker runner container image (e.g. `ghcr.io/actions/actions-runner:latest`).
 - `--no-docker-socket`: For Docker mode, do not mount `/var/run/docker.sock` into the container.
 - `--force`: Bypass critical pre-flight failures at your own risk.
 - `--no-service`: Configure without immediately starting the persistent background service.
@@ -284,18 +302,20 @@ Inspects installed runner metadata, configuration, and background service state:
 dgrunner status
 ```
 
-**Sample Output:**
+**Sample Output (Docker Runner with Ubuntu 24.04 LTS):**
 ```text
 === dgrunner Status Dashboard ===
 
 ┌─ RUNNER STATUS ────────────────────────────────────────────┐
 │ Installed:   Yes                                           │
 │ Configured:  Yes                                           │
-│ Runner Name: dordoone-runner                               │
-│ Target URL:  https://github.com/mhbdev/dordoone            │
-│ Labels:      self-hosted, dgrunner, windows, x64           │
-│ Service:     Active & Running (PID: 48080)                 │
-│ Directory:   C:\Users\username\.dgrunner\actions-runner    │
+│ Environment: Linux Container (Docker) [Ubuntu 24.04 LTS]   │
+│ Container:   upstand-dgrunner-linux                        │
+│ Image:       ghcr.io/actions/actions-runner:latest         │
+│ Runner Name: my-workstation-linux-docker                   │
+│ Target URL:  https://github.com/my-org/private-repo        │
+│ Labels:      self-hosted, linux, x64, docker, ubuntu-24.04 │
+│ Service:     Active & Running (Docker Container)           │
 └─────────────────────────────────────────────────────────────┘
 ```
 

@@ -20,12 +20,18 @@ export function registerStatusCommand(program: Command): void {
       ];
 
       if (status.mode === "docker") {
-        statusLines.push(`Environment: ${pc.cyan("Linux Container (Docker)")}`);
+        const distroLabel = status.distro ? ` [${status.distro}]` : "";
+        statusLines.push(`Environment: ${pc.cyan(`Linux Container (Docker)${distroLabel}`)}`);
         statusLines.push(`Container:   ${pc.bold(status.containerName || "upstand-dgrunner-linux")}`);
+        if (status.image) {
+          statusLines.push(`Image:       ${pc.dim(status.image)}`);
+        }
       } else if (status.mode === "wsl") {
-        statusLines.push(`Environment: ${pc.cyan("WSL2 Linux")}`);
+        const distroLabel = status.distro ? ` (${status.distro})` : "";
+        statusLines.push(`Environment: ${pc.cyan(`WSL2 Linux${distroLabel}`)}`);
       } else {
-        statusLines.push(`Environment: ${pc.cyan(process.platform === "win32" ? "Windows Native" : "Linux Native")}`);
+        const distroLabel = status.distro ? ` (${status.distro})` : "";
+        statusLines.push(`Environment: ${pc.cyan(process.platform === "win32" ? "Windows Native" : `Linux Native${distroLabel}`)}`);
       }
 
       if (status.runnerName) {

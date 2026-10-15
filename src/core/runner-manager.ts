@@ -23,6 +23,8 @@ export interface RunnerMetadata {
   arch: string;
   mode?: "native" | "docker" | "wsl";
   containerName?: string;
+  distro?: string;
+  image?: string;
 }
 
 export interface RunnerStatusInfo {
@@ -36,6 +38,8 @@ export interface RunnerStatusInfo {
   activePid?: number;
   mode?: "native" | "docker" | "wsl";
   containerName?: string;
+  distro?: string;
+  image?: string;
 }
 
 export function getRunnerConfigFile(baseDir = DEFAULT_BASE_DIR): string {
@@ -142,7 +146,7 @@ export async function ensureRunnerEnvironment(runnerDir = DEFAULT_RUNNER_DIR): P
 /**
  * Configures the downloaded GitHub Actions runner.
  */
-export async function configureRunner(options: {
+export interface ConfigureRunnerOptions {
   runnerDir?: string;
   url: string;
   token: string;
@@ -150,7 +154,11 @@ export async function configureRunner(options: {
   labels?: string[];
   workDir?: string;
   replace?: boolean;
-}): Promise<{ success: boolean; output: string }> {
+  mode?: "native" | "docker" | "wsl";
+  distro?: string;
+}
+
+export async function configureRunner(options: ConfigureRunnerOptions): Promise<{ success: boolean; output: string }> {
   const runnerDir = options.runnerDir || DEFAULT_RUNNER_DIR;
   const runnerName = options.name || `${os.hostname()}-dgrunner`;
   const workDir = options.workDir || "_work";
@@ -194,6 +202,8 @@ export async function configureRunner(options: {
       configuredAt: new Date().toISOString(),
       os: process.platform,
       arch: process.arch,
+      mode: options.mode || (process.platform === "win32" ? "native" : "native"),
+      distro: options.distro,
     });
   }
 
@@ -422,6 +432,8 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
       serviceRunning: dStatus.running,
       mode: "docker",
       containerName: localMeta.containerName,
+      distro: localMeta.distro,
+      image: localMeta.image,
     };
   }
 
@@ -469,6 +481,9 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
     serviceInstalled: configured,
     serviceRunning,
     activePid,
+    mode: localMeta?.mode,
+    distro: localMeta?.distro,
+    image: localMeta?.image,
   };
 }
 

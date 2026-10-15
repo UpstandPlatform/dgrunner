@@ -5,6 +5,34 @@ import { saveLocalMetadata } from "./runner-manager.js";
 export const DEFAULT_CONTAINER_NAME = "upstand-dgrunner-linux";
 export const DEFAULT_DOCKER_RUNNER_IMAGE = "ghcr.io/actions/actions-runner:latest";
 
+export interface DockerDistroPreset {
+  id: string;
+  name: string;
+  image: string;
+  defaultLabels: string[];
+}
+
+export const DOCKER_DISTRO_PRESETS: Record<string, DockerDistroPreset> = {
+  "ubuntu-24.04": {
+    id: "ubuntu-24.04",
+    name: "Ubuntu 24.04 LTS (Noble)",
+    image: "ghcr.io/actions/actions-runner:latest",
+    defaultLabels: ["self-hosted", "linux", "x64", "docker", "ubuntu", "ubuntu-24.04", "dgrunner"],
+  },
+  "ubuntu-22.04": {
+    id: "ubuntu-22.04",
+    name: "Ubuntu 22.04 LTS (Jammy)",
+    image: "ghcr.io/actions/actions-runner:2.316.0",
+    defaultLabels: ["self-hosted", "linux", "x64", "docker", "ubuntu", "ubuntu-22.04", "dgrunner"],
+  },
+  "debian": {
+    id: "debian",
+    name: "Debian (Bookworm compatible)",
+    image: "ghcr.io/actions/actions-runner:latest",
+    defaultLabels: ["self-hosted", "linux", "x64", "docker", "debian", "dgrunner"],
+  },
+};
+
 export interface DockerRunnerOptions {
   containerName?: string;
   runnerName?: string;
@@ -12,6 +40,7 @@ export interface DockerRunnerOptions {
   token: string;
   labels?: string[];
   image?: string;
+  distro?: string;
   mountDockerSocket?: boolean;
 }
 
@@ -72,11 +101,14 @@ export async function startDockerRunner(
   options: DockerRunnerOptions
 ): Promise<{ success: boolean; output: string }> {
   const containerName = options.containerName || DEFAULT_CONTAINER_NAME;
-  const image = options.image || DEFAULT_DOCKER_RUNNER_IMAGE;
+  const presetKey = options.distro ? options.distro.toLowerCase() : undefined;
+  const preset = presetKey ? DOCKER_DISTRO_PRESETS[presetKey] : undefined;
+  const image = options.image || preset?.image || DEFAULT_DOCKER_RUNNER_IMAGE;
+  const distro = preset?.name || options.distro || (options.image ? "Custom Docker Image" : DOCKER_DISTRO_PRESETS["ubuntu-24.04"].name);
   const runnerName = options.runnerName || `${os.hostname().toLowerCase()}-linux-docker`;
   const labels = options.labels && options.labels.length > 0
     ? options.labels
-    : ["self-hosted", "linux", "x64", "docker", "dgrunner"];
+    : (preset?.defaultLabels || ["self-hosted", "linux", "x64", "docker", "dgrunner"]);
   const labelsStr = labels.join(",");
 
   // Check if container already exists and remove it to prevent conflicts
@@ -132,6 +164,8 @@ export async function startDockerRunner(
       arch: "x64",
       mode: "docker",
       containerName,
+      distro,
+      image,
     });
   }
 
