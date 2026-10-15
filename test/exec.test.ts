@@ -3,10 +3,18 @@ import path from "node:path";
 import { execCommand } from "../src/utils/exec.js";
 import { DEFAULT_RUNNER_DIR } from "../src/config/constants.js";
 
+import fs from "node:fs";
+
 describe("Exec Utility", () => {
   it("should successfully execute config.cmd on Windows when present", async () => {
     if (process.platform !== "win32") return;
     const configCmd = path.join(DEFAULT_RUNNER_DIR, "config.cmd");
+    if (!fs.existsSync(configCmd)) {
+      const result = await execCommand("cmd.exe", ["/c", "echo", "exec-test"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("exec-test");
+      return;
+    }
     const result = await execCommand(configCmd, ["--help"], {
       cwd: DEFAULT_RUNNER_DIR,
     });

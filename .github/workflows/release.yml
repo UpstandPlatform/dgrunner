@@ -25,11 +25,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js (v20)
+      - name: Setup Node.js (v22)
         uses: actions/setup-node@v4
         with:
-          node-version: 20.x
-          registry-url: 'https://registry.npmjs.org'
+          node-version: 22.x
           cache: 'npm'
 
       - name: Install Dependencies
@@ -47,12 +46,12 @@ jobs:
       - name: Verify Package Contents
         run: npm pack --dry-run
 
-      - name: Publish to npm (Trusted Publisher / Provenance)
-        run: npm publish --access public --provenance
-        env:
-          # If npm Trusted Publisher OIDC is configured, npm uses id-token.
-          # If using traditional token, NODE_AUTH_TOKEN is used as fallback.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (Trusted Publishing / Provenance)
+        run: |
+          if [ -n "${{ secrets.NPM_TOKEN }}" ]; then
+            echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
+          fi
+          npm publish --access public --provenance
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
