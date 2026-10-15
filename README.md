@@ -133,7 +133,7 @@ If you want to contribute, modify, or run the development build locally:
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/upstand/dgrunner.git
+git clone https://github.com/UpstandPlatform/dgrunner.git
 cd dgrunner
 
 # 2. Install dependencies
@@ -482,7 +482,7 @@ To configure npm to publish without static tokens:
 1. Log into your account on [npmjs.com](https://www.npmjs.com).
 2. Go to package `@upstand/dgrunner` (or create it under `@upstand`).
 3. Click **Settings** ➔ **Publishing Access** ➔ **Add Publishing Access** ➔ **GitHub Actions**.
-4. Set the repository name (e.g. `upstand/dgrunner`) and specify the workflow file name (`release.yml`).
+4. Set the repository name (`UpstandPlatform/dgrunner`) and specify the workflow file name (`release.yml`).
 5. Now, pushing any tag (e.g. `v1.0.0`) publishes cryptographically signed packages with provenance to npm automatically!
 
 ---

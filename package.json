@@ -27,12 +27,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/upstand/dgrunner.git"
+    "url": "https://github.com/UpstandPlatform/dgrunner.git"
   },
   "bugs": {
-    "url": "https://github.com/upstand/dgrunner/issues"
+    "url": "https://github.com/UpstandPlatform/dgrunner/issues"
   },
-  "homepage": "https://github.com/upstand/dgrunner#readme",
+  "homepage": "https://github.com/UpstandPlatform/dgrunner#readme",
   "keywords": [
     "github-actions",
     "self-hosted-runner",
