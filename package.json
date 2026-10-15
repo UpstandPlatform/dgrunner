@@ -1,6 +1,6 @@
 {
   "name": "@upstand/dgrunner",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Clean, minimal, and secure self-hosted GitHub Actions runner CLI with Docker integration",
   "type": "module",
   "main": "./dist/index.js",

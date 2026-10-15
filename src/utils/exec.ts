@@ -1,3 +1,4 @@
+import path from "node:path";
 import { spawn, type SpawnOptions } from "node:child_process";
 
 export interface ExecResult {
@@ -12,6 +13,32 @@ export interface ExecOptions extends SpawnOptions {
   hideError?: boolean;
 }
 
+const WINDOWS_CMD_WRAPPERS = new Set(["npm", "npx", "pnpm", "yarn", "bun", "corepack"]);
+
+export function resolveExecutable(cmd: string, args: string[]): { actualCmd: string; actualArgs: string[] } {
+  if (process.platform !== "win32") {
+    return { actualCmd: cmd, actualArgs: args };
+  }
+
+  const base = path.basename(cmd).toLowerCase();
+  const baseWithoutExt = path.basename(cmd, path.extname(cmd)).toLowerCase();
+
+  const isBatchOrCmd =
+    base.endsWith(".cmd") ||
+    base.endsWith(".bat") ||
+    WINDOWS_CMD_WRAPPERS.has(base) ||
+    WINDOWS_CMD_WRAPPERS.has(baseWithoutExt);
+
+  if (isBatchOrCmd) {
+    return {
+      actualCmd: process.env.COMSPEC || "cmd.exe",
+      actualArgs: ["/d", "/c", cmd, ...args],
+    };
+  }
+
+  return { actualCmd: cmd, actualArgs: args };
+}
+
 export function execCommand(
   cmd: string,
   args: string[] = [],
@@ -20,13 +47,7 @@ export function execCommand(
   return new Promise((resolve) => {
     const { timeoutMs, input, hideError, ...spawnOpts } = options;
 
-    let actualCmd = cmd;
-    let actualArgs = args;
-
-    if (process.platform === "win32" && (cmd.endsWith(".cmd") || cmd.endsWith(".bat"))) {
-      actualCmd = process.env.COMSPEC || "cmd.exe";
-      actualArgs = ["/d", "/c", cmd, ...args];
-    }
+    const { actualCmd, actualArgs } = resolveExecutable(cmd, args);
 
     let child;
     try {
@@ -97,13 +118,7 @@ export function execInteractive(
   options: SpawnOptions = {}
 ): Promise<number> {
   return new Promise((resolve, reject) => {
-    let actualCmd = cmd;
-    let actualArgs = args;
-
-    if (process.platform === "win32" && (cmd.endsWith(".cmd") || cmd.endsWith(".bat"))) {
-      actualCmd = process.env.COMSPEC || "cmd.exe";
-      actualArgs = ["/d", "/c", cmd, ...args];
-    }
+    const { actualCmd, actualArgs } = resolveExecutable(cmd, args);
 
     const child = spawn(actualCmd, actualArgs, {
       stdio: "inherit",
