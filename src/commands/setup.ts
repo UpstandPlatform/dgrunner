@@ -13,6 +13,8 @@ import {
   DEFAULT_CONTAINER_NAME,
   DEFAULT_DOCKER_RUNNER_IMAGE,
   DOCKER_DISTRO_PRESETS,
+  getDefaultDockerRunnerName,
+  validateDockerContainerName,
 } from "../core/docker-runner.js";
 import {
   isWsl,
@@ -38,6 +40,7 @@ export interface SetupOptions {
   distro?: string;
   image?: string;
   dockerSocket?: boolean;
+  containerName?: string;
 }
 
 const WSL_SETUP_COMMAND = [
@@ -135,6 +138,20 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
   // Fallback default
   if (!targetEnv) {
     targetEnv = process.platform === "win32" ? "windows" : "native";
+  }
+
+  if (options.containerName && targetEnv !== "docker") {
+    logger.error("--container-name can only be used with Docker runner setup (--env docker).");
+    process.exitCode = 1;
+    return;
+  }
+  if (options.containerName) {
+    const containerNameError = validateDockerContainerName(options.containerName);
+    if (containerNameError) {
+      logger.error(containerNameError);
+      process.exitCode = 1;
+      return;
+    }
   }
 
   // Handle WSL option when selected on Windows
@@ -348,7 +365,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
     if (!runnerName) {
       const defaultName =
         targetEnv === "docker"
-          ? `${os.hostname().toLowerCase()}-linux-docker`
+          ? getDefaultDockerRunnerName(options.containerName || DEFAULT_CONTAINER_NAME)
           : targetEnv === "windows"
           ? `${os.hostname().toLowerCase()}-dgrunner`
           : `${os.hostname().toLowerCase()}-linux`;
@@ -392,7 +409,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
     if (!runnerName) {
       runnerName =
         targetEnv === "docker"
-          ? `${os.hostname().toLowerCase()}-linux-docker`
+          ? getDefaultDockerRunnerName(options.containerName || DEFAULT_CONTAINER_NAME)
           : targetEnv === "windows"
           ? `${os.hostname().toLowerCase()}-dgrunner`
           : `${os.hostname().toLowerCase()}-linux`;
@@ -412,6 +429,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
 
   // Step 3 & 4: Execution based on Target Environment
   if (targetEnv === "docker") {
+    const containerName = options.containerName || DEFAULT_CONTAINER_NAME;
     // Docker Container Runner
     logger.step(3, 4, `Verifying Linux runner container image [${targetDistroName}]...`);
     logger.dim(`  → Checking / pulling ${targetImage}...`);
@@ -427,6 +445,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
 
     logger.step(4, 4, `Registering & starting Linux runner container in Docker [${targetDistroName}]...`);
     const dockerRes = await startDockerRunner({
+      containerName,
       url: targetUrl!,
       token: token!,
       runnerName,
@@ -472,16 +491,16 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
         `Environment: ${pc.cyan("Linux Container (via Docker)")}`,
         `Distro:      ${pc.green(targetDistroName)}`,
         `Image:       ${pc.dim(targetImage)}`,
-        `Container:   ${pc.bold(DEFAULT_CONTAINER_NAME)}`,
+        `Container:   ${pc.bold(containerName)}`,
         `Restart:     ${pc.green("unless-stopped (automatic reconnect)")}`,
         `Token:       ${maskToken(token!)} (used ephemerally, not stored)`,
         "",
         pc.green("✔ Your PC + Docker is now active as an authentic Linux self-hosted runner!"),
         "",
-        `Check status:   ${pc.cyan("dgrunner status")}`,
-        `View live logs: ${pc.cyan("dgrunner logs --follow")}`,
+        `Check status:   ${pc.cyan(`dgrunner status --runner ${containerName}`)}`,
+        `View live logs: ${pc.cyan(`dgrunner logs --runner ${containerName} --follow`)}`,
         `List processes: ${pc.cyan("dgrunner ps")}`,
-        `Stop runner:    ${pc.cyan("dgrunner stop")}`,
+        `Stop runner:    ${pc.cyan(`dgrunner stop --runner ${containerName}`)}`,
       ],
       "green"
     );
@@ -595,6 +614,7 @@ export function registerSetupCommand(program: Command): void {
       .choices(["windows", "docker", "wsl", "native"]))
     .option("--distro <distro>", "Linux distribution preset ('ubuntu-24.04', 'ubuntu-22.04', 'debian') or WSL distro name")
     .option("--image <image>", "Custom Docker runner container image")
+    .option("--container-name <name>", "Docker container name (use a unique name for each Docker runner)")
     .option("--docker-socket", "Mount the host Docker socket into the runner (grants workflows host-level Docker control)", false)
     .option("--force", "Ignore critical pre-flight check failures and proceed", false)
     .option("--no-service", "Do not install or start persistent background service")

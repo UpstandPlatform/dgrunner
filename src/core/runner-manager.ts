@@ -10,6 +10,7 @@ import { DEFAULT_BASE_DIR, DEFAULT_RUNNER_DIR } from "../config/constants.js";
 import { execCommand, execInteractive } from "../utils/exec.js";
 import {
   DEFAULT_CONTAINER_NAME,
+  DGRUNNER_MANAGED_LABEL,
   getDockerRunnerStatus,
   startDockerContainer,
   stopDockerRunner,
@@ -52,6 +53,23 @@ export function getRunnerConfigFile(baseDir = DEFAULT_BASE_DIR): string {
   return path.join(baseDir, "dgrunner-meta.json");
 }
 
+function getRunnerRegistryDir(baseDir = DEFAULT_BASE_DIR): string {
+  return path.join(baseDir, "runners");
+}
+
+function runnerMetadataIdentity(metadata: RunnerMetadata): string {
+  if (metadata.mode === "docker") {
+    const containerName = metadata.containerName || metadata.runnerDir.replace(/^docker:/, "");
+    return `docker:${containerName}`;
+  }
+  return `native:${path.resolve(metadata.runnerDir).toLowerCase()}`;
+}
+
+function getRunnerMetadataFile(metadata: RunnerMetadata, baseDir = DEFAULT_BASE_DIR): string {
+  const key = crypto.createHash("sha256").update(runnerMetadataIdentity(metadata)).digest("hex");
+  return path.join(getRunnerRegistryDir(baseDir), `${key}.json`);
+}
+
 function getRunnerPidFile(runnerDir: string): string {
   const runnerKey = crypto.createHash("sha256").update(path.resolve(runnerDir).toLowerCase()).digest("hex").slice(0, 16);
   return path.join(DEFAULT_BASE_DIR, `runner-${runnerKey}.pid`);
@@ -84,16 +102,53 @@ export async function readLocalMetadata(baseDir = DEFAULT_BASE_DIR): Promise<Run
 
   try {
     const content = await fsPromises.readFile(metaFile, "utf-8");
-    return JSON.parse(content);
+    const value: unknown = JSON.parse(content);
+    return isRunnerMetadata(value) ? value : null;
   } catch {
     return null;
   }
 }
 
+function isRunnerMetadata(value: unknown): value is RunnerMetadata {
+  if (!value || typeof value !== "object") return false;
+  const metadata = value as Partial<RunnerMetadata>;
+  return typeof metadata.runnerDir === "string" &&
+    typeof metadata.name === "string" &&
+    typeof metadata.url === "string" &&
+    Array.isArray(metadata.labels) &&
+    metadata.labels.every((label) => typeof label === "string") &&
+    (metadata.mode === undefined || metadata.mode === "native" || metadata.mode === "docker" || metadata.mode === "wsl") &&
+    (metadata.containerName === undefined || typeof metadata.containerName === "string");
+}
+
+export async function listLocalRunnerMetadata(baseDir = DEFAULT_BASE_DIR): Promise<RunnerMetadata[]> {
+  const metadataByIdentity = new Map<string, RunnerMetadata>();
+  const registryDir = getRunnerRegistryDir(baseDir);
+  const registryFiles = await fsPromises.readdir(registryDir).catch(() => []);
+
+  for (const fileName of registryFiles.filter((name) => name.endsWith(".json"))) {
+    try {
+      const value: unknown = JSON.parse(await fsPromises.readFile(path.join(registryDir, fileName), "utf-8"));
+      if (isRunnerMetadata(value)) metadataByIdentity.set(runnerMetadataIdentity(value), value);
+    } catch {}
+  }
+
+  const legacyMetadata = await readLocalMetadata(baseDir);
+  if (legacyMetadata && isRunnerMetadata(legacyMetadata)) {
+    const identity = runnerMetadataIdentity(legacyMetadata);
+    if (!metadataByIdentity.has(identity)) metadataByIdentity.set(identity, legacyMetadata);
+  }
+
+  return [...metadataByIdentity.values()];
+}
+
 export function metadataMatchesRunner(metadata: RunnerMetadata | null, runnerDir: string): boolean {
   if (!metadata) return false;
   if (metadata.mode === "docker") {
-    return path.resolve(runnerDir).toLowerCase() === path.resolve(DEFAULT_RUNNER_DIR).toLowerCase();
+    const containerName = metadata.containerName || metadata.runnerDir.replace(/^docker:/, "");
+    if (runnerDir.startsWith("docker:")) return containerName === runnerDir.slice("docker:".length);
+    return path.resolve(runnerDir).toLowerCase() === path.resolve(DEFAULT_RUNNER_DIR).toLowerCase() &&
+      containerName === DEFAULT_CONTAINER_NAME;
   }
 
   const metadataRunnerDir = metadata.runnerDir || DEFAULT_RUNNER_DIR;
@@ -104,17 +159,72 @@ export async function readMetadataForRunner(
   runnerDir: string,
   baseDir = DEFAULT_BASE_DIR
 ): Promise<RunnerMetadata | null> {
-  const metadata = await readLocalMetadata(baseDir);
-  return metadataMatchesRunner(metadata, runnerDir) ? metadata : null;
+  const metadata = await listLocalRunnerMetadata(baseDir);
+  const matches = metadata.filter((entry) => metadataMatchesRunner(entry, runnerDir));
+  if (matches.length > 1 && path.resolve(runnerDir).toLowerCase() === path.resolve(DEFAULT_RUNNER_DIR).toLowerCase()) {
+    const nativeMetadata = matches.find((entry) => entry.mode !== "docker");
+    const dockerMetadata = matches.find((entry) => entry.mode === "docker");
+    return isRunnerConfigured(runnerDir) ? nativeMetadata || dockerMetadata || null : dockerMetadata || nativeMetadata || null;
+  }
+  return matches[0] || null;
 }
 
 export async function saveLocalMetadata(meta: RunnerMetadata, baseDir = DEFAULT_BASE_DIR): Promise<void> {
+  const previousMetadata = await readLocalMetadata(baseDir);
+  if (previousMetadata && isRunnerMetadata(previousMetadata) && runnerMetadataIdentity(previousMetadata) !== runnerMetadataIdentity(meta)) {
+    await fsPromises.mkdir(getRunnerRegistryDir(baseDir), { recursive: true, mode: 0o700 });
+    await fsPromises.writeFile(getRunnerMetadataFile(previousMetadata, baseDir), JSON.stringify(previousMetadata, null, 2), {
+      mode: 0o600,
+      encoding: "utf-8",
+    });
+  }
+
+  await fsPromises.mkdir(getRunnerRegistryDir(baseDir), { recursive: true, mode: 0o700 });
+  await fsPromises.writeFile(getRunnerMetadataFile(meta, baseDir), JSON.stringify(meta, null, 2), {
+    mode: 0o600,
+    encoding: "utf-8",
+  });
+
   const metaFile = getRunnerConfigFile(baseDir);
   await fsPromises.mkdir(path.dirname(metaFile), { recursive: true, mode: 0o700 });
   await fsPromises.writeFile(metaFile, JSON.stringify(meta, null, 2), {
     mode: 0o600,
     encoding: "utf-8",
   });
+}
+
+export async function removeLocalMetadata(meta: RunnerMetadata, baseDir = DEFAULT_BASE_DIR): Promise<void> {
+  await fsPromises.unlink(getRunnerMetadataFile(meta, baseDir)).catch(() => {});
+  const legacyMetadata = await readLocalMetadata(baseDir);
+  if (legacyMetadata && isRunnerMetadata(legacyMetadata) && runnerMetadataIdentity(legacyMetadata) === runnerMetadataIdentity(meta)) {
+    await fsPromises.unlink(getRunnerConfigFile(baseDir)).catch(() => {});
+  }
+}
+
+export async function resolveRunnerDirectory(
+  selector: string | undefined,
+  defaultRunnerDir = DEFAULT_RUNNER_DIR,
+  baseDir = DEFAULT_BASE_DIR
+): Promise<{ runnerDir?: string; error?: string }> {
+  if (!selector) return { runnerDir: defaultRunnerDir };
+
+  const normalizedSelector = selector.trim().toLowerCase();
+  const matches = (await listLocalRunnerMetadata(baseDir)).filter((metadata) =>
+    metadata.name.toLowerCase() === normalizedSelector ||
+    metadata.containerName?.toLowerCase() === normalizedSelector ||
+    metadata.runnerDir.toLowerCase() === normalizedSelector
+  );
+  const uniqueMatches = [...new Map(matches.map((metadata) => [runnerMetadataIdentity(metadata), metadata])).values()];
+
+  if (uniqueMatches.length === 1) return { runnerDir: uniqueMatches[0]?.runnerDir };
+  if (uniqueMatches.length === 0) {
+    return { error: `No configured runner named '${selector}' was found. Use 'dgrunner ps' to see active runners.` };
+  }
+
+  const selectors = uniqueMatches.map((metadata) => metadata.containerName || metadata.runnerDir);
+  return {
+    error: `Runner name '${selector}' is ambiguous. Select one by container name or runner directory: ${selectors.join(", ")}.`,
+  };
 }
 
 /**
@@ -487,12 +597,7 @@ export async function removeRunner(
   const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
     const res = await removeDockerRunner(token, localMeta.containerName);
-    const metaFile = getRunnerConfigFile();
-    if (res.success && fs.existsSync(metaFile)) {
-      try {
-        fs.unlinkSync(metaFile);
-      } catch {}
-    }
+    if (res.success) await removeLocalMetadata(localMeta);
     return res;
   }
 
@@ -518,12 +623,7 @@ export async function removeRunner(
     timeoutMs: 30000,
   });
 
-  const metaFile = getRunnerConfigFile();
-  if (result.exitCode === 0 && localMeta && fs.existsSync(metaFile)) {
-    try {
-      fs.unlinkSync(metaFile);
-    } catch {}
-  }
+  if (result.exitCode === 0 && localMeta) await removeLocalMetadata(localMeta);
 
   return {
     success: result.exitCode === 0,
@@ -825,53 +925,64 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
 
   // 1. Check Docker runner containers
   try {
-    const dockerPs = await execCommand("docker", [
-      "ps",
-      "--filter", "name=upstand-dgrunner",
-      "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}",
-    ]);
-    if (dockerPs.exitCode === 0 && dockerPs.stdout.trim()) {
+    const containersById = new Map<string, { id: string; name: string; status: string }>();
+    const dockerPsFilters = [
+      ["--filter", `label=${DGRUNNER_MANAGED_LABEL}=true`],
+      ["--filter", "name=upstand-dgrunner"],
+    ];
+    for (const filter of dockerPsFilters) {
+      const dockerPs = await execCommand("docker", [
+        "ps",
+        ...filter,
+        "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}",
+      ]);
+      if (dockerPs.exitCode !== 0 || !dockerPs.stdout.trim()) continue;
       const lines = dockerPs.stdout.split(/\r?\n/).filter(Boolean);
-      const containers: Array<{ id: string; name: string; status: string }> = [];
       for (const line of lines) {
         const [id, name, status] = line.split("\t");
         if (id && name) {
-          containers.push({ id, name, status: status || "Up (healthy)" });
+          containersById.set(id, { id, name, status: status || "Up (healthy)" });
         }
       }
+    }
 
+    const containers = [...containersById.values()];
+    if (containers.length > 0) {
       const memoryByContainer = new Map<string, number>();
-      if (containers.length > 0) {
-        const dockerStats = await execCommand("docker", [
+      const dockerStats = await execCommand("docker", [
           "stats",
           "--no-stream",
           "--format",
           "{{.ID}}\t{{.MemUsage}}",
           ...containers.map((container) => container.id),
-        ], { timeoutMs: 5_000 });
-        if (dockerStats.exitCode === 0 && dockerStats.stdout.trim()) {
-          for (const line of dockerStats.stdout.split(/\r?\n/).filter(Boolean)) {
-            const [statsId, memoryUsage] = line.split("\t");
-            if (!statsId || !memoryUsage) continue;
-            const container = containers.find(({ id, name }) => {
-              const normalizedStatsId = statsId.toLowerCase();
-              const normalizedId = id.toLowerCase();
-              return normalizedId.startsWith(normalizedStatsId) ||
-                normalizedStatsId.startsWith(normalizedId) ||
-                name.toLowerCase() === normalizedStatsId;
-            });
-            const memoryMb = parseDockerMemoryMb(memoryUsage);
-            if (container && memoryMb !== undefined) memoryByContainer.set(container.id, memoryMb);
-          }
+      ], { timeoutMs: 5_000 }).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+      if (dockerStats.exitCode === 0 && dockerStats.stdout.trim()) {
+        for (const line of dockerStats.stdout.split(/\r?\n/).filter(Boolean)) {
+          const [statsId, memoryUsage] = line.split("\t");
+          if (!statsId || !memoryUsage) continue;
+          const container = containers.find(({ id, name }) => {
+            const normalizedStatsId = statsId.toLowerCase();
+            const normalizedId = id.toLowerCase();
+            return normalizedId.startsWith(normalizedStatsId) ||
+              normalizedStatsId.startsWith(normalizedId) ||
+              name.toLowerCase() === normalizedStatsId;
+          });
+          const memoryMb = parseDockerMemoryMb(memoryUsage);
+          if (container && memoryMb !== undefined) memoryByContainer.set(container.id, memoryMb);
         }
       }
 
+      const metadataByContainer = new Map(await Promise.all(containers.map(async (container) => [
+        container.name,
+        await readMetadataForRunner(`docker:${container.name}`),
+      ] as const)));
       for (const container of containers) {
+        const containerMetadata = metadataByContainer.get(container.name);
         results.push({
           pid: container.id.slice(0, 12),
           name: `${container.name} (docker)`,
-          runnerName: localMeta?.name || container.name,
-          targetUrl: localMeta?.url || targetUrl,
+          runnerName: containerMetadata?.name || container.name,
+          targetUrl: containerMetadata?.url || "Unknown",
           memoryMb: memoryByContainer.get(container.id),
           status: container.status,
         });
@@ -974,8 +1085,7 @@ export async function tailRunnerLogs(options: {
 } = {}): Promise<void> {
   const runnerDir = options.runnerDir || DEFAULT_RUNNER_DIR;
   const linesCount = Math.max(1, Math.min(10000, Math.floor(options.lines || 50)));
-  const metadata = await readLocalMetadata(options.baseDir);
-  const localMeta = metadataMatchesRunner(metadata, runnerDir) ? metadata : null;
+  const localMeta = await readMetadataForRunner(runnerDir, options.baseDir);
   if (localMeta?.mode === "docker") {
     await tailDockerRunnerLogs(localMeta.containerName, options.follow, linesCount);
     return;

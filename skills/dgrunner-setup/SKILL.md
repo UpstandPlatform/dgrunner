@@ -48,6 +48,10 @@ The `native` and `wsl` modes are Linux targets. On Windows, `--env docker` provi
 4. Use default labels unless the workflows require custom labels. If custom labels are needed, ensure every corresponding workflow `runs-on` label matches exactly. Do not omit `self-hosted` when explicitly specifying labels.
 5. Keep self-hosted runners limited to trusted private repositories or trusted organizations. Do not execute pull-request code from public forks on a machine with secrets, internal network access, or valuable local data.
 
+## Run multiple Docker runners
+
+Use a unique GitHub runner name and a unique `--container-name` for each Docker runner. Each managed container has its own persistent work volume. Select a configured runner with `--runner <runner-name-or-container-name>` on status, start, stop, restart, run, logs, and remove commands. Use custom labels in `runs-on` to route jobs to the right runner. Multiple runners on one host share the host's CPU, memory, network, and security boundary.
+
 ## Verify setup
 
 Run:

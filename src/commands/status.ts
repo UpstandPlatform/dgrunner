@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import pc from "picocolors";
-import { getRunnerStatus } from "../core/runner-manager.js";
+import { getRunnerStatus, resolveRunnerDirectory } from "../core/runner-manager.js";
 import { logger } from "../utils/logger.js";
 import { DEFAULT_RUNNER_DIR } from "../config/constants.js";
 
@@ -9,10 +9,18 @@ export function registerStatusCommand(program: Command): void {
     .command("status")
     .description("Check status of the installed runner and background service")
     .option("-d, --dir <path>", "Runner directory to check", DEFAULT_RUNNER_DIR)
+    .option("--runner <name>", "Configured runner name or Docker container name")
     .action(async (options) => {
       logger.header("dgrunner Status Dashboard");
 
-      const status = await getRunnerStatus(options.dir);
+      const resolved = await resolveRunnerDirectory(options.runner, options.dir);
+      if (resolved.error || !resolved.runnerDir) {
+        logger.error(resolved.error || "Could not resolve the requested runner.");
+        process.exitCode = 1;
+        return;
+      }
+
+      const status = await getRunnerStatus(resolved.runnerDir);
 
       const statusLines: string[] = [
         `Installed:   ${status.installed ? pc.green("Yes") : pc.red("No")}`,
@@ -62,7 +70,7 @@ export function registerStatusCommand(program: Command): void {
 
       statusLines.push(`Runner state: ${serviceStatus}`);
       if (status.mode !== "docker") {
-        statusLines.push(`Directory:   ${options.dir}`);
+        statusLines.push(`Directory:   ${resolved.runnerDir}`);
       }
 
       const borderColor = status.serviceRunning ? "green" : status.configured ? "yellow" : "red";
@@ -71,7 +79,8 @@ export function registerStatusCommand(program: Command): void {
       if (!status.installed) {
         console.log(`  To install, run: ${pc.green("dgrunner setup")}`);
       } else if (!status.serviceRunning) {
-        console.log(`  To start the runner, run: ${pc.green("dgrunner start")}`);
+        const selector = options.runner ? ` --runner ${options.runner}` : "";
+        console.log(`  To start the runner, run: ${pc.green(`dgrunner start${selector}`)}`);
       }
       console.log();
     });

@@ -5,7 +5,27 @@ import { saveLocalMetadata } from "./runner-manager.js";
 
 export const DEFAULT_CONTAINER_NAME = "upstand-dgrunner-linux";
 export const DEFAULT_DOCKER_RUNNER_IMAGE = "ghcr.io/actions/actions-runner:latest";
+export const DGRUNNER_MANAGED_LABEL = "com.upstand.dgrunner.managed";
+const DGRUNNER_RUNNER_NAME_LABEL = "com.upstand.dgrunner.runner-name";
+const DGRUNNER_RUNNER_URL_LABEL = "com.upstand.dgrunner.runner-url";
 const LEGACY_WORK_VOLUME_NAME = "dgrunner-linux-work";
+
+export function getDefaultDockerRunnerName(
+  containerName = DEFAULT_CONTAINER_NAME,
+  hostName = os.hostname()
+): string {
+  const hostPrefix = hostName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "host";
+  if (containerName === DEFAULT_CONTAINER_NAME) return `${hostPrefix}-linux-docker`;
+
+  const containerSuffix = crypto.createHash("sha256").update(containerName).digest("hex").slice(0, 12);
+  return `${hostPrefix}-linux-docker-${containerSuffix}`;
+}
+
+export function validateDockerContainerName(containerName: string): string | null {
+  return /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(containerName)
+    ? null
+    : "Docker container names must start with a letter or number and contain only letters, numbers, '.', '_' or '-' (maximum 128 characters).";
+}
 
 export function getDockerRunnerWorkVolumeName(containerName: string): string {
   const suffix = crypto.createHash("sha256").update(containerName).digest("hex").slice(0, 16);
@@ -137,11 +157,13 @@ export async function startDockerRunner(
   options: DockerRunnerOptions
 ): Promise<{ success: boolean; output: string }> {
   const containerName = options.containerName || DEFAULT_CONTAINER_NAME;
+  const containerNameError = validateDockerContainerName(containerName);
+  if (containerNameError) return { success: false, output: containerNameError };
   const presetKey = options.distro ? options.distro.toLowerCase() : undefined;
   const preset = presetKey ? DOCKER_DISTRO_PRESETS[presetKey] : undefined;
   const image = options.image || preset?.image || DEFAULT_DOCKER_RUNNER_IMAGE;
   const distro = preset?.name || options.distro || (options.image ? "Custom Docker Image" : DOCKER_DISTRO_PRESETS["ubuntu-24.04"].name);
-  const runnerName = options.runnerName || `${os.hostname().toLowerCase()}-linux-docker`;
+  const runnerName = options.runnerName || getDefaultDockerRunnerName(containerName);
   const labels = options.labels && options.labels.length > 0
     ? options.labels
     : (preset?.defaultLabels || ["self-hosted", "linux", "x64", "docker", "dgrunner"]);
@@ -150,6 +172,38 @@ export async function startDockerRunner(
   // Check if container already exists and remove it to prevent conflicts
   const status = await getDockerRunnerStatus(containerName);
   if (status.exists) {
+    const inspect = await execCommand("docker", [
+      "inspect",
+      containerName,
+      "--format",
+      "{{json .Config.Labels}}",
+    ], { timeoutMs: 5000 });
+    let existingLabels: Record<string, string> | null = null;
+    try {
+      existingLabels = JSON.parse(inspect.stdout) as Record<string, string> | null;
+    } catch {}
+
+    if (inspect.exitCode !== 0) {
+      return {
+        success: false,
+        output: `Could not verify ownership of Docker container '${containerName}'.`,
+      };
+    }
+    const managedByDgrunner = existingLabels?.[DGRUNNER_MANAGED_LABEL] === "true";
+    if (containerName !== DEFAULT_CONTAINER_NAME && !managedByDgrunner) {
+      return {
+        success: false,
+        output: `Docker container '${containerName}' already exists and is not managed by dgrunner. Choose another container name.`,
+      };
+    }
+    if (managedByDgrunner &&
+      (existingLabels?.[DGRUNNER_RUNNER_NAME_LABEL] !== runnerName || existingLabels?.[DGRUNNER_RUNNER_URL_LABEL] !== options.url)) {
+      return {
+        success: false,
+        output: `Docker container '${containerName}' belongs to a different runner registration. Choose another container name or remove the existing runner first.`,
+      };
+    }
+
     const removeExisting = await execCommand("docker", ["rm", "-f", containerName], {
       timeoutMs: 30000,
     });
@@ -171,6 +225,9 @@ export async function startDockerRunner(
     "run",
     "-d",
     "--name", containerName,
+    "--label", `${DGRUNNER_MANAGED_LABEL}=true`,
+    "--label", `${DGRUNNER_RUNNER_NAME_LABEL}=${runnerName}`,
+    "--label", `${DGRUNNER_RUNNER_URL_LABEL}=${options.url}`,
     "--restart", "unless-stopped",
   ];
 

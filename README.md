@@ -292,6 +292,15 @@ dgrunner setup --env docker --distro ubuntu-22.04
 # Set up a Docker runner with a custom runner image:
 dgrunner setup --env docker --image my-org/custom-actions-runner:latest
 
+# Set up additional Docker runners with separate containers and purpose labels:
+dgrunner setup --env docker --container-name dgrunner-build \
+  --url https://github.com/owner/repo --name build-runner \
+  --labels self-hosted,linux,x64,docker,ubuntu-24.04,build
+
+dgrunner setup --env docker --container-name dgrunner-gpu \
+  --url https://github.com/owner/repo --name gpu-runner \
+  --labels self-hosted,linux,x64,docker,ubuntu-24.04,gpu
+
 # Set up inside a specific WSL2 distro on Windows:
 dgrunner setup --env wsl --distro Ubuntu-24.04
 
@@ -315,16 +324,33 @@ dgrunner setup \
 **Options:**
 - `-u, --url <url>`: Target GitHub repository or organization URL.
 - `-t, --token <token>`: Optional GitHub Actions registration token. Prefer the hidden prompt to avoid shell history and process-list exposure. Native setup briefly passes the token to GitHub's configuration process in argv.
-- `-n, --name <name>`: Custom runner name (defaults to `<hostname>-linux-docker` or `<hostname>-dgrunner`).
+- `-n, --name <name>`: Custom runner name (defaults to `<hostname>-linux-docker` for the default Docker container; additional Docker containers get a stable unique suffix).
 - `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,linux,x64,docker,ubuntu-24.04`).
 - `-d, --dir <path>`: Runner installation directory (defaults to `~/.dgrunner/actions-runner`).
 - `--os <os>`: Target runner OS: `windows` or `linux` (on Windows, `linux` launches Docker container mode).
 - `--env <env>`: Target environment: `windows`, `docker`, `wsl`, or `native`.
 - `--distro <distro>`: Linux distribution preset (`ubuntu-24.04`, `ubuntu-22.04`, `debian`) or WSL distro name.
 - `--image <image>`: Custom Docker runner container image (e.g. `ghcr.io/actions/actions-runner:latest`).
+- `--container-name <name>`: Docker container name. Choose a distinct name for each Docker runner; the default remains `upstand-dgrunner-linux` for compatibility.
 - `--docker-socket`: Explicitly mount `/var/run/docker.sock` into the container. Workflows can gain control over the Docker host through this socket.
 - `--force`: Bypass critical pre-flight failures at your own risk.
 - `--no-service`: Configure without immediately starting the runner. Windows mode is a background process, not an installed OS service.
+
+#### Multiple Docker runners
+
+Each Docker runner needs a unique GitHub runner name and Docker container name. dgrunner gives each additional container a stable unique default runner name, its own persistent workspace volume, and a separate metadata record, so managing or removing one runner does not affect the others. Existing installations using the default container name continue to work.
+
+Use the runner name or container name to select an instance with lifecycle commands:
+
+```bash
+dgrunner status --runner gpu-runner
+dgrunner logs --runner dgrunner-gpu --follow
+dgrunner stop --runner gpu-runner
+dgrunner start --runner dgrunner-gpu
+dgrunner remove --runner gpu-runner
+```
+
+Route workflows by the custom labels assigned during setup. For example, `runs-on: [self-hosted, gpu]` selects a runner carrying both labels. Labels route jobs but do not isolate jobs from the host or from other containers on the same Docker host. Each runner handles one job at a time; multiple runners can run jobs concurrently subject to available resources.
 
 ---
 

@@ -27,7 +27,7 @@ dgrunner run
 dgrunner logs --follow
 ~~~
 
-Use `dgrunner run` to attach in the foreground and stream runner output. Use `dgrunner logs --follow` to follow logs; in Docker mode this streams the container logs. The `start`, `stop`, `restart`, `run`, `ps`, and `status` commands accept `--dir <path>`; `doctor` accepts `--dir <base-path>`. On Docker mode, the CLI manages the container recorded in local dgrunner metadata. The default container name is `upstand-dgrunner-linux`; each runner uses an isolated workspace volume that persists across container restarts and is cleared when the runner is re-registered or removed.
+Use `dgrunner run` to attach in the foreground and stream runner output. Use `dgrunner logs --follow` to follow logs; in Docker mode this streams the selected container's logs. The `start`, `stop`, `restart`, `run`, `logs`, `remove`, and `status` commands accept `--runner <runner-name-or-container-name>` to select a configured runner; the service and status commands also accept `--dir <path>` for native runners. `ps` lists all active managed runners, and `doctor` accepts `--dir <base-path>`. The default Docker container name is `upstand-dgrunner-linux`; additional Docker runners use their own container names and isolated workspace volumes, which persist across restarts and are cleared when that runner is re-registered or removed.
 
 For Docker diagnostics, read the container logs and inspect its mounts:
 

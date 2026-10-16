@@ -19,10 +19,12 @@ import {
   DEFAULT_CONTAINER_NAME,
   DEFAULT_DOCKER_RUNNER_IMAGE,
   DOCKER_DISTRO_PRESETS,
+  getDefaultDockerRunnerName,
   getDockerRunnerStatus,
   getDockerRunnerWorkVolumeName,
   removeDockerRunner,
   tailDockerRunnerLogs,
+  validateDockerContainerName,
 } from "../src/core/docker-runner.js";
 
 describe("Docker Runner Module", () => {
@@ -42,6 +44,27 @@ describe("Docker Runner Module", () => {
     expect(first).toMatch(/^dgrunner-work-[a-f0-9]{16}$/);
     expect(second).not.toBe(first);
     expect(getDockerRunnerWorkVolumeName("runner-one")).toBe(first);
+  });
+
+  it("generates distinct stable default runner names for custom containers", () => {
+    expect(getDefaultDockerRunnerName(DEFAULT_CONTAINER_NAME, "build_host"))
+      .toBe("build-host-linux-docker");
+    expect(getDefaultDockerRunnerName("dgrunner-build", "build_host"))
+      .toMatch(/^build-host-linux-docker-[a-f0-9]{12}$/);
+    expect(getDefaultDockerRunnerName("dgrunner-build", "build_host"))
+      .not.toBe(getDefaultDockerRunnerName("dgrunner-gpu", "build_host"));
+  });
+
+  it("validates explicit Docker container names before invoking Docker", async () => {
+    expect(validateDockerContainerName("dgrunner-gpu_1")).toBeNull();
+    expect(validateDockerContainerName("../runner")).toContain("Docker container names");
+    const result = await startDockerRunner({
+      containerName: "../runner",
+      url: "https://github.com/example/repo",
+      token: "runner-token-value-123456",
+    });
+    expect(result.success).toBe(false);
+    expect(execCommandMock).not.toHaveBeenCalled();
   });
 
   it("should define standard Linux distribution presets for Docker", () => {
@@ -96,8 +119,69 @@ describe("Docker Runner Module", () => {
     expect(runCall?.[1]).not.toContain("dgrunner-linux-work:/home/runner/_work");
     expect(runCall?.[1]?.join(" ")).toContain("chown -R");
     expect(runCall?.[1]?.join(" ")).toContain("/home/runner/_work/_tool");
+    expect(runCall?.[1]?.join(" ")).toContain("com.upstand.dgrunner.managed=true");
     expect(configureCall?.[1]).not.toContain(token);
     expect(configureCall?.[2]).toMatchObject({ input: `${token}\n` });
+  });
+
+  it("does not replace a custom-name Docker container that is not managed by dgrunner", async () => {
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '{"Running":true,"Status":"running"}', stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '{"other.label":"value"}', stderr: "" });
+
+    const result = await startDockerRunner({
+      containerName: "existing-service",
+      url: "https://github.com/example/repo",
+      token: "runner-token-value-123456",
+      runnerName: "actions-runner",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("not managed by dgrunner");
+    expect(execCommandMock.mock.calls.map((call) => call[1]?.[0])).toEqual(["inspect", "inspect"]);
+  });
+
+  it("does not replace the default container when it belongs to a different runner", async () => {
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '{"Running":true,"Status":"running"}', stderr: "" })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          "com.upstand.dgrunner.managed": "true",
+          "com.upstand.dgrunner.runner-name": "existing-runner",
+          "com.upstand.dgrunner.runner-url": "https://github.com/example/repo",
+        }),
+        stderr: "",
+      });
+
+    const result = await startDockerRunner({
+      url: "https://github.com/example/repo",
+      token: "runner-token-value-123456",
+      runnerName: "new-runner",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("different runner registration");
+    expect(execCommandMock.mock.calls.map((call) => call[1]?.[0])).toEqual(["inspect", "inspect"]);
+  });
+
+  it("continues to support reconfiguring the legacy default container", async () => {
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '{"Running":true,"Status":"running"}', stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "{}", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "removed", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "Error: no such volume" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "container-id", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "configured", stderr: "" });
+
+    const result = await startDockerRunner({
+      url: "https://github.com/example/repo",
+      token: "runner-token-value-123456",
+      runnerName: "legacy-runner",
+    });
+
+    expect(result.success).toBe(true);
+    expect(execCommandMock.mock.calls.some((call) => call[1]?.[0] === "rm" && call[1]?.[1] === "-f")).toBe(true);
   });
 
   it("mounts the host Docker socket only when explicitly requested", async () => {

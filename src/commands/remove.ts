@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import pc from "picocolors";
 import { password, confirm } from "@inquirer/prompts";
-import { removeRunner, isRunnerConfigured, readMetadataForRunner } from "../core/runner-manager.js";
+import { removeRunner, isRunnerConfigured, readMetadataForRunner, resolveRunnerDirectory } from "../core/runner-manager.js";
 import { validateRegistrationToken } from "../core/security.js";
 import { logger } from "../utils/logger.js";
 import { DEFAULT_RUNNER_DIR } from "../config/constants.js";
@@ -12,14 +12,23 @@ export function registerRemoveCommand(program: Command): void {
     .description("Unregister and remove the GitHub Actions runner from GitHub")
     .option("-t, --token <token>", "GitHub runner removal token")
     .option("-d, --dir <path>", "Runner directory", DEFAULT_RUNNER_DIR)
+    .option("--runner <name>", "Configured runner name or Docker container name")
     .option("-y, --yes", "Skip interactive confirmation", false)
     .action(async (options) => {
       logger.header("Remove GitHub Actions Runner");
 
-      const metadata = await readMetadataForRunner(options.dir);
-      const configured = metadata?.mode === "docker" || isRunnerConfigured(options.dir);
+      const resolved = await resolveRunnerDirectory(options.runner, options.dir);
+      if (resolved.error || !resolved.runnerDir) {
+        logger.error(resolved.error || "Could not resolve the requested runner.");
+        process.exitCode = 1;
+        return;
+      }
+
+      const runnerDir = resolved.runnerDir;
+      const metadata = await readMetadataForRunner(runnerDir);
+      const configured = metadata?.mode === "docker" || isRunnerConfigured(runnerDir);
       if (!configured) {
-        logger.warn(`No configured runner found in ${options.dir}. Nothing to remove.`);
+        logger.warn(`No configured runner found in ${runnerDir}. Nothing to remove.`);
         return;
       }
 
@@ -58,7 +67,7 @@ export function registerRemoveCommand(program: Command): void {
       }
 
       logger.info("Unregistering runner and cleaning up service...");
-      const res = await removeRunner(options.dir, token);
+      const res = await removeRunner(runnerDir, token);
 
       if (res.success) {
         logger.success("Runner successfully unregistered from GitHub and removed!");

@@ -4,6 +4,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { DEFAULT_RUNNER_DIR } from "../src/config/constants.js";
+import { DEFAULT_CONTAINER_NAME } from "../src/core/docker-runner.js";
 const { execCommandMock, execInteractiveMock } = vi.hoisted(() => ({
   execCommandMock: vi.fn(),
   execInteractiveMock: vi.fn(),
@@ -14,7 +15,11 @@ vi.mock("../src/utils/exec.js", () => ({
 }));
 import {
   metadataMatchesRunner,
+  listLocalRunnerMetadata,
   readMetadataForRunner,
+  removeLocalMetadata,
+  resolveRunnerDirectory,
+  saveLocalMetadata,
   runForeground,
   startService,
   stopService,
@@ -48,9 +53,19 @@ describe("Runner metadata routing", () => {
 
   it("applies Docker metadata to the default managed runner directory", () => {
     expect(metadataMatchesRunner(
-      metadata({ mode: "docker", runnerDir: "docker:upstand-dgrunner-linux" }),
+      metadata({ mode: "docker", runnerDir: `docker:${DEFAULT_CONTAINER_NAME}`, containerName: DEFAULT_CONTAINER_NAME }),
       DEFAULT_RUNNER_DIR,
     )).toBe(true);
+  });
+
+  it("routes each Docker runner by its own container name", () => {
+    const customDockerRunner = metadata({
+      mode: "docker",
+      runnerDir: "docker:dgrunner-gpu",
+      containerName: "dgrunner-gpu",
+    });
+    expect(metadataMatchesRunner(customDockerRunner, "docker:dgrunner-gpu")).toBe(true);
+    expect(metadataMatchesRunner(customDockerRunner, DEFAULT_RUNNER_DIR)).toBe(false);
   });
 
   it("applies native metadata only to the runner directory recorded during setup", () => {
@@ -69,7 +84,42 @@ describe("Runner metadata routing", () => {
 
     try {
       await expect(readMetadataForRunner(customRunnerDir, baseDir)).resolves.toBeNull();
-      await expect(readMetadataForRunner(DEFAULT_RUNNER_DIR, baseDir)).resolves.toMatchObject({ mode: "docker" });
+      await expect(readMetadataForRunner(DEFAULT_RUNNER_DIR, baseDir)).resolves.toBeNull();
+      await expect(readMetadataForRunner("docker:test-runner", baseDir)).resolves.toMatchObject({ mode: "docker" });
+    } finally {
+      await fs.rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stores and resolves multiple Docker runner metadata records independently", async () => {
+    const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-metadata-registry-"));
+    const buildRunner = metadata({
+      mode: "docker",
+      runnerDir: "docker:dgrunner-build",
+      containerName: "dgrunner-build",
+      name: "build-runner",
+    });
+    const gpuRunner = metadata({
+      mode: "docker",
+      runnerDir: "docker:dgrunner-gpu",
+      containerName: "dgrunner-gpu",
+      name: "gpu-runner",
+    });
+
+    try {
+      await saveLocalMetadata(buildRunner, baseDir);
+      await saveLocalMetadata(gpuRunner, baseDir);
+
+      await expect(listLocalRunnerMetadata(baseDir)).resolves.toHaveLength(2);
+      await expect(readMetadataForRunner("docker:dgrunner-build", baseDir)).resolves.toMatchObject({ name: "build-runner" });
+      await expect(readMetadataForRunner("docker:dgrunner-gpu", baseDir)).resolves.toMatchObject({ name: "gpu-runner" });
+      await expect(resolveRunnerDirectory("gpu-runner", DEFAULT_RUNNER_DIR, baseDir)).resolves.toMatchObject({
+        runnerDir: "docker:dgrunner-gpu",
+      });
+
+      await removeLocalMetadata(buildRunner, baseDir);
+      await expect(listLocalRunnerMetadata(baseDir)).resolves.toHaveLength(1);
+      await expect(readMetadataForRunner("docker:dgrunner-gpu", baseDir)).resolves.toMatchObject({ name: "gpu-runner" });
     } finally {
       await fs.rm(baseDir, { recursive: true, force: true });
     }
@@ -86,6 +136,11 @@ describe("Runner process memory reporting", () => {
         stderr: "",
       })
       .mockResolvedValueOnce({
+        exitCode: 1,
+        stdout: "",
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
         exitCode: 0,
         stdout: "abc123def456\t57.2MiB / 7.7GiB",
         stderr: "",
@@ -99,10 +154,45 @@ describe("Runner process memory reporting", () => {
         memoryMb: 57,
         status: "Up 8 seconds",
       });
-      expect(execCommandMock.mock.calls[1]).toEqual([
+      expect(execCommandMock.mock.calls[2]).toEqual([
         "docker",
         ["stats", "--no-stream", "--format", "{{.ID}}\t{{.MemUsage}}", "abc123def456"],
         { timeoutMs: 5_000 },
+      ]);
+    } finally {
+      execCommandMock.mockReset();
+      await fs.rm(runnerDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists multiple independently named Docker runners", async () => {
+    const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-multiple-docker-"));
+    execCommandMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: [
+          "build12345678\tdgrunner-build\tUp 2 minutes",
+          "gpu1234567890\tdgrunner-gpu\tUp 1 minute",
+        ].join("\n"),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: [
+          "build12345678\t71MiB / 8GiB",
+          "gpu1234567890\t120MiB / 8GiB",
+        ].join("\n"),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "" });
+
+    try {
+      const processes = await listRunnerProcesses(runnerDir);
+      expect(processes).toHaveLength(2);
+      expect(processes.map(({ name, memoryMb }) => ({ name, memoryMb }))).toEqual([
+        { name: "dgrunner-build (docker)", memoryMb: 71 },
+        { name: "dgrunner-gpu (docker)", memoryMb: 120 },
       ]);
     } finally {
       execCommandMock.mockReset();
@@ -114,6 +204,7 @@ describe("Runner process memory reporting", () => {
     if (process.platform !== "linux") return;
     const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-process-memory-"));
     execCommandMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "docker unavailable" })
       .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "docker unavailable" })
       .mockResolvedValueOnce({
         exitCode: 0,
@@ -136,6 +227,7 @@ describe("Foreground runner and live log handling", () => {
   it("reports only the runner executable name when Linux pgrep returns a full path", async () => {
     if (process.platform === "win32") return;
     execCommandMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "docker unavailable" })
       .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "docker unavailable" })
       .mockResolvedValueOnce({
         exitCode: 0,
@@ -255,7 +347,7 @@ describe("Foreground runner and live log handling", () => {
     execInteractiveMock.mockResolvedValue(0);
 
     try {
-      await tailRunnerLogs({ runnerDir: DEFAULT_RUNNER_DIR, baseDir, follow: true, lines: 17 });
+      await tailRunnerLogs({ runnerDir: "docker:test-runner", baseDir, follow: true, lines: 17 });
       expect(execInteractiveMock).toHaveBeenCalledWith(
         "docker",
         ["logs", "--tail", "17", "-f", "test-runner"]

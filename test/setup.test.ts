@@ -22,6 +22,15 @@ describe("Setup command options", () => {
     expect(environmentOption?.argChoices).toEqual(["windows", "docker", "wsl", "native"]);
   });
 
+  it("exposes an explicit Docker container name for multi-runner setup", () => {
+    const program = new Command();
+    registerSetupCommand(program);
+    const setup = program.commands.find((command) => command.name() === "setup");
+    const containerNameOption = setup?.options.find((option) => option.long === "--container-name");
+
+    expect(containerNameOption).toBeDefined();
+  });
+
   it("rejects an invalid --env value during CLI parsing", async () => {
     const program = new Command();
     program.exitOverride();
