@@ -11,6 +11,12 @@ export interface LinuxDistroInfo {
   version?: string;
 }
 
+export interface InstalledWslDistro {
+  name: string;
+  state: "Running" | "Stopped";
+  version: 1 | 2;
+}
+
 /**
  * Checks if the current process is running inside Windows Subsystem for Linux (WSL).
  */
@@ -69,6 +75,40 @@ export async function getInstalledWslDistros(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+/**
+ * Lists installed WSL distributions with their runtime state and WSL version.
+ */
+export async function getInstalledWslDistroDetails(): Promise<InstalledWslDistro[] | null> {
+  if (process.platform !== "win32") return null;
+
+  try {
+    const { stdout } = await execAsync("wsl.exe -l -v", { encoding: "buffer", timeout: 5000 });
+    return parseInstalledWslDistroDetails(stdout.toString("utf16le"));
+  } catch {
+    return null;
+  }
+}
+
+export function parseInstalledWslDistroDetails(text: string): InstalledWslDistro[] {
+  const distros: InstalledWslDistro[] = [];
+  const cleanText = text.replace(/\0/g, "").replace(/^\uFEFF/, "");
+
+  for (const line of cleanText.split(/\r?\n/)) {
+    const match = line.match(/^\s*\*?\s*(.+?)\s+(Running|Stopped)\s+([12])\s*$/i);
+    if (!match?.[1] || !match[2] || !match[3]) continue;
+    const name = match[1].trim();
+    if (!name || name.toLowerCase().includes("docker-desktop")) continue;
+    const state = match[2].toLowerCase() === "running" ? "Running" : "Stopped";
+    distros.push({
+      name,
+      state,
+      version: Number.parseInt(match[3], 10) as InstalledWslDistro["version"],
+    });
+  }
+
+  return distros;
 }
 
 /**

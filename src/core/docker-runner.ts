@@ -367,14 +367,12 @@ export async function removeDockerRunner(
  */
 export async function tailDockerRunnerLogs(
   containerName = DEFAULT_CONTAINER_NAME,
-  follow = false
+  follow = false,
+  lines = 50
 ): Promise<void> {
-  const args = ["logs"];
-  if (follow) {
-    args.push("-f");
-  } else {
-    args.push("--tail", "50");
-  }
+  const linesCount = Math.max(1, Math.min(10000, Math.floor(lines || 50)));
+  const args = ["logs", "--tail", String(linesCount)];
+  if (follow) args.push("-f");
   args.push(containerName);
 
   await execInteractive("docker", args);

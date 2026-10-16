@@ -44,5 +44,14 @@ describe("Doctor Module", () => {
       expect(platformCheck?.status).toBe("pass");
     }
   });
+
+  it("checks WSL prerequisites without adding the Windows Git Bash check", async () => {
+    const report = await runDoctorChecks({ targetEnv: "wsl" });
+    expect(report.checks.some((check) => check.id === "git-bash")).toBe(false);
+    expect(report.checks.some((check) => check.id === "wsl-cli")).toBe(true);
+    if (process.platform === "win32") {
+      expect(report.checks.some((check) => check.id === "wsl-distros")).toBe(true);
+    }
+  }, 60000);
 });
 

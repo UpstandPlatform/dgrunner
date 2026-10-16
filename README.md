@@ -235,6 +235,7 @@ Runs a battery of system diagnostics and security audits:
 - User privilege isolation (warns on elevated Windows admin; errors on Linux root).
 - Git version and PATH availability.
 - Git Bash detection on Windows (to avoid WSL collisions).
+- WSL command availability and installed WSL2 distributions when targeting WSL.
 - Docker engine availability and daemon responsiveness.
 - Docker rootless mode audit on Linux.
 - Unauthenticated remote Docker TCP socket check.
@@ -246,6 +247,7 @@ dgrunner doctor
 dgrunner doctor --strict        # Exits with code 1 if warnings or errors exist
 dgrunner doctor --dir ~/runner  # Check specific installation path
 dgrunner doctor --env docker    # Evaluate checks for a planned Docker runner
+dgrunner doctor --env wsl       # Check WSL2 prerequisites from Windows
 ```
 
 ---
@@ -362,7 +364,7 @@ dgrunner start
 # Start and stay attached in foreground
 dgrunner start --attach
 
-# Gracefully stop the runner service
+# Stop the runner service or attached foreground process
 dgrunner stop
 
 # Restart the runner service
@@ -414,7 +416,7 @@ dgrunner logs --follow
 dgrunner logs -n 100 -f
 ```
 
-Native Linux logs are read from the systemd journal and may prompt for sudo access. Windows background logs include both stdout and stderr.
+Docker logs honor `--lines` for both static output and follow mode. Native Linux logs are read from the systemd journal and may prompt for sudo access. Windows background logs include both stdout and stderr.
 
 ---
 

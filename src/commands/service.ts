@@ -3,6 +3,7 @@ import pc from "picocolors";
 import {
   startService,
   stopService,
+  restartService,
   runForeground,
   listRunnerProcesses,
   tailRunnerLogs,
@@ -50,7 +51,7 @@ export function registerServiceCommands(program: Command): void {
   // dgrunner stop
   program
     .command("stop")
-    .description("Stop the persistent runner background service")
+    .description("Stop the runner service or foreground process")
     .option("-d, --dir <path>", "Runner directory", DEFAULT_RUNNER_DIR)
     .action(async (options) => {
       logger.info("Stopping runner...");
@@ -70,10 +71,9 @@ export function registerServiceCommands(program: Command): void {
     .option("-d, --dir <path>", "Runner directory", DEFAULT_RUNNER_DIR)
     .action(async (options) => {
       logger.info("Restarting runner service...");
-      await stopService(options.dir);
-      const res = await startService(options.dir);
+      const res = await restartService(options.dir);
       if (res.success) {
-        logger.success("Runner restarted successfully.");
+        logger.success(res.message);
       } else {
         logger.error(res.message);
         process.exit(1);

@@ -1,14 +1,15 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { startDockerRunner } from "../src/core/docker-runner.js";
 
-const { execCommandMock, saveMetadataMock } = vi.hoisted(() => ({
+const { execCommandMock, execInteractiveMock, saveMetadataMock } = vi.hoisted(() => ({
   execCommandMock: vi.fn(),
+  execInteractiveMock: vi.fn(),
   saveMetadataMock: vi.fn(),
 }));
 
 vi.mock("../src/utils/exec.js", () => ({
   execCommand: execCommandMock,
-  execInteractive: vi.fn(),
+  execInteractive: execInteractiveMock,
 }));
 
 vi.mock("../src/core/runner-manager.js", () => ({
@@ -21,6 +22,7 @@ import {
   getDockerRunnerStatus,
   getDockerRunnerWorkVolumeName,
   removeDockerRunner,
+  tailDockerRunnerLogs,
 } from "../src/core/docker-runner.js";
 
 describe("Docker Runner Module", () => {
@@ -132,6 +134,18 @@ describe("Docker Runner Module", () => {
     expect(result.success).toBe(true);
     expect(execCommandMock.mock.calls.map((call) => call[1])).toContainEqual([
       "volume", "rm", getDockerRunnerWorkVolumeName("test-runner"),
+    ]);
+  });
+
+  it("limits Docker log output for both static and followed logs", async () => {
+    await tailDockerRunnerLogs("test-runner", false, 23);
+    await tailDockerRunnerLogs("test-runner", true, 11);
+
+    expect(execInteractiveMock).toHaveBeenNthCalledWith(1, "docker", [
+      "logs", "--tail", "23", "test-runner",
+    ]);
+    expect(execInteractiveMock).toHaveBeenNthCalledWith(2, "docker", [
+      "logs", "--tail", "11", "-f", "test-runner",
     ]);
   });
 });

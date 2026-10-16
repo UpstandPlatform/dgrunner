@@ -9,6 +9,7 @@ import spawn from "cross-spawn";
 import { DEFAULT_BASE_DIR, DEFAULT_RUNNER_DIR } from "../config/constants.js";
 import { execCommand, execInteractive } from "../utils/exec.js";
 import {
+  DEFAULT_CONTAINER_NAME,
   getDockerRunnerStatus,
   startDockerContainer,
   stopDockerRunner,
@@ -99,8 +100,11 @@ export function metadataMatchesRunner(metadata: RunnerMetadata | null, runnerDir
   return path.resolve(metadataRunnerDir).toLowerCase() === path.resolve(runnerDir).toLowerCase();
 }
 
-async function readMetadataForRunner(runnerDir: string): Promise<RunnerMetadata | null> {
-  const metadata = await readLocalMetadata();
+export async function readMetadataForRunner(
+  runnerDir: string,
+  baseDir = DEFAULT_BASE_DIR
+): Promise<RunnerMetadata | null> {
+  const metadata = await readLocalMetadata(baseDir);
   return metadataMatchesRunner(metadata, runnerDir) ? metadata : null;
 }
 
@@ -281,6 +285,14 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
     };
   }
 
+  const currentStatus = await getRunnerStatus(runnerDir);
+  if (currentStatus.serviceRunning) {
+    return {
+      success: true,
+      message: `Runner is already running${currentStatus.activePid ? ` with PID ${currentStatus.activePid}` : ""}.`,
+    };
+  }
+
   if (process.platform === "win32") {
     // Check if run.cmd exists
     const runCmd = path.join(runnerDir, "run.cmd");
@@ -291,13 +303,6 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
     // Launch run.cmd in detached background mode if not already running
     await fsPromises.mkdir(DEFAULT_BASE_DIR, { recursive: true, mode: 0o700 });
     const pidFile = getRunnerPidFile(runnerDir);
-    if (fs.existsSync(pidFile)) {
-      const existingPid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-      const isAlive = !isNaN(existingPid) && await verifyWindowsRunnerProcess(existingPid, runnerDir);
-      if (isAlive) {
-        return { success: true, message: `Runner is already running with PID ${existingPid}.` };
-      }
-    }
 
     await ensureRunnerEnvironment(runnerDir);
 
@@ -377,37 +382,99 @@ export async function stopService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ suc
 
   if (process.platform === "win32") {
     const pidFile = getRunnerPidFile(runnerDir);
+    const pids = new Set(await findRunnerListenerPids(runnerDir));
     if (fs.existsSync(pidFile)) {
       const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-      if (!isNaN(pid)) {
-        if (await verifyWindowsRunnerProcess(pid, runnerDir)) {
-          const stopped = await execCommand("taskkill.exe", ["/pid", String(pid), "/t", "/f"]);
-          if (stopped.exitCode !== 0) {
-            return { success: false, message: stopped.stderr || stopped.stdout || "Failed to stop runner process." };
+      if (Number.isInteger(pid) && pid > 0 && await verifyWindowsRunnerProcess(pid, runnerDir)) {
+        pids.add(pid);
+      }
+    }
+
+    for (const pid of pids) {
+      const stopped = await execCommand("taskkill.exe", ["/pid", String(pid), "/t", "/f"]);
+      if (stopped.exitCode !== 0 && await verifyWindowsRunnerProcess(pid, runnerDir)) {
+        return { success: false, message: stopped.stderr || stopped.stdout || `Failed to stop runner process ${pid}.` };
+      }
+    }
+
+    try {
+      fs.unlinkSync(pidFile);
+    } catch {}
+
+    return { success: true, message: pids.size ? "Runner process stopped." : "Runner is not running." };
+  } else {
+    const svcPath = path.join(runnerDir, "svc.sh");
+    const serviceInstalled = fs.existsSync(path.join(runnerDir, ".service"));
+    if (serviceInstalled) {
+      if (!fs.existsSync(svcPath)) {
+        return { success: false, message: `Runner service script not found at ${svcPath}` };
+      }
+      const res = await execCommand("sudo", ["./svc.sh", "stop"], {
+        cwd: runnerDir,
+        stdio: ["inherit", "pipe", "pipe"],
+        timeoutMs: 120000,
+      });
+      if (res.exitCode !== 0) {
+        return { success: false, message: res.stderr || res.stdout || "Failed to stop runner systemd service." };
+      }
+    }
+
+    const pids = await findRunnerListenerPids(runnerDir);
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGINT");
+      } catch (error: any) {
+        if (error?.code !== "ESRCH") {
+          return { success: false, message: `Failed to stop runner process ${pid}: ${error?.message || String(error)}` };
+        }
+      }
+    }
+
+    if (pids.length > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const remainingPids = await findRunnerListenerPids(runnerDir);
+      for (const pid of remainingPids) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch (error: any) {
+          if (error?.code !== "ESRCH") {
+            return { success: false, message: `Failed to stop runner process ${pid}: ${error?.message || String(error)}` };
           }
         }
       }
-      try {
-        fs.unlinkSync(pidFile);
-      } catch {}
+      if ((await findRunnerListenerPids(runnerDir)).length > 0) {
+        return { success: false, message: "Runner process is still running after stop signals were sent." };
+      }
     }
 
-    return { success: true, message: "Runner service stopped." };
-  } else {
-    const svcPath = path.join(runnerDir, "svc.sh");
-    if (!fs.existsSync(svcPath)) {
-      return { success: false, message: `Runner service script not found at ${svcPath}` };
-    }
-    const res = await execCommand("sudo", ["./svc.sh", "stop"], {
-      cwd: runnerDir,
-      stdio: ["inherit", "pipe", "pipe"],
-      timeoutMs: 120000,
-    });
     return {
-      success: res.exitCode === 0,
-      message: res.exitCode === 0 ? "Runner systemd service stopped." : (res.stderr || res.stdout),
+      success: true,
+      message: serviceInstalled ? "Runner systemd service stopped." : pids.length ? "Runner process stopped." : "Runner is not running.",
     };
   }
+}
+
+/**
+ * Restarts a native or Docker runner and reports stop failures before starting it again.
+ */
+export async function restartService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
+  const localMeta = await readMetadataForRunner(runnerDir);
+  if (localMeta?.mode === "docker") {
+    const containerName = localMeta.containerName || DEFAULT_CONTAINER_NAME;
+    const result = await restartDockerRunner(containerName);
+    return {
+      success: result.success,
+      message: result.success ? `Docker runner container '${containerName}' restarted.` : result.output,
+    };
+  }
+
+  const stopped = await stopService(runnerDir);
+  if (!stopped.success) return stopped;
+
+  const started = await startService(runnerDir);
+  if (!started.success) return started;
+
+  return { success: true, message: "Runner restarted successfully." };
 }
 
 /**
@@ -492,6 +559,11 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
 
   let serviceRunning = false;
   let activePid: number | undefined;
+  const listenerPids = await findRunnerListenerPids(runnerDir);
+  if (listenerPids.length > 0) {
+    serviceRunning = true;
+    activePid = listenerPids[0];
+  }
 
   if (process.platform === "win32") {
     const pidFile = getRunnerPidFile(runnerDir);
@@ -509,7 +581,7 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
   } else {
     // Status is readable without sudo on systemd; avoid an unnecessary password prompt.
     const svcPath = path.join(runnerDir, "svc.sh");
-    if (fs.existsSync(svcPath)) {
+    if (!serviceRunning && fs.existsSync(svcPath) && fs.existsSync(path.join(runnerDir, ".service"))) {
       const svcRes = await execCommand("./svc.sh", ["status"], { cwd: runnerDir, timeoutMs: 10000 });
       serviceRunning = svcRes.exitCode === 0 && svcRes.stdout.toLowerCase().includes("active (running)");
     }
@@ -539,7 +611,7 @@ async function verifyWindowsRunnerProcess(pid: number, runnerDir: string): Promi
     env: {
       ...process.env,
       DGRUNNER_PID: String(pid),
-      DGRUNNER_EXECUTABLE: path.join(runnerDir, "bin", "Runner.Listener.exe"),
+      DGRUNNER_EXECUTABLE: path.resolve(runnerDir, "bin", "Runner.Listener.exe"),
     },
   });
   return result.exitCode === 0;
@@ -575,7 +647,7 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
   }
 
   const runnerStatus = await getRunnerStatus(runnerDir);
-  if (runnerStatus.serviceRunning || await hasRunnerListenerProcess(runnerDir)) {
+  if (runnerStatus.serviceRunning) {
     console.error("The runner is already running in the background. Stop it with 'dgrunner stop' before attaching.");
     console.error("Use 'dgrunner logs --follow' to view the active runner logs.");
     return 1;
@@ -634,40 +706,76 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
   });
 }
 
-async function hasRunnerListenerProcess(runnerDir: string): Promise<boolean> {
+async function findRunnerListenerPids(runnerDir: string): Promise<number[]> {
   if (process.platform === "win32") {
     const result = await execCommand("powershell.exe", ["-NoProfile", "-Command", [
       "$expected = [IO.Path]::GetFullPath($env:DGRUNNER_EXECUTABLE)",
-      "$matches = Get-CimInstance Win32_Process | Where-Object { $_.Name -ieq 'Runner.Listener.exe' -and $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expected) }",
-      "if ($matches) { exit 0 }",
-      "exit 1",
+      "$runnerProcesses = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -ieq 'Runner.Listener.exe' -and $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expected) })",
+      "if ($runnerProcesses.Count -gt 0) { [Console]::Write(($runnerProcesses.ProcessId -join ',')) }",
     ].join("; ")], {
       env: {
         ...process.env,
-        DGRUNNER_EXECUTABLE: path.join(runnerDir, "bin", "Runner.Listener.exe"),
+        DGRUNNER_EXECUTABLE: path.resolve(runnerDir, "bin", "Runner.Listener.exe"),
       },
     });
-    return result.exitCode === 0;
+    if (result.exitCode !== 0) return [];
+    return [...new Set(result.stdout.split(/[\s,;]+/).map((value) => Number.parseInt(value, 10)))]
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
   }
 
   if (process.platform === "linux") {
+    const runnerDirAbsolute = path.resolve(runnerDir);
+    const runnerExecutable = path.join(runnerDirAbsolute, "bin", "Runner.Listener");
+    const expectedExecutable = await fsPromises.realpath(runnerExecutable).catch(() => runnerExecutable);
+    const pids = new Set<number>();
+    const result = await execCommand("pgrep", ["-af", "Runner.Listener"]);
+    if (result.exitCode === 0 && result.stdout.trim()) {
+      // pgrep is quick and continues to list processes when /proc/<pid>/exe is
+      // restricted. Scope relative invocations by checking each process cwd.
+      for (const line of result.stdout.split(/\r?\n/)) {
+        const match = line.match(/^\s*(\d+)\s+(.+)$/);
+        if (!match || !match[1] || !match[2]) continue;
+        const pid = Number.parseInt(match[1], 10);
+        const command = match[2];
+        if (command.includes(expectedExecutable) || command.includes(`${runnerDirAbsolute}${path.sep}`)) {
+          pids.add(pid);
+          continue;
+        }
+        try {
+          const executable = (await fsPromises.readlink(path.join("/proc", String(pid), "exe"))).replace(/ \(deleted\)$/, "");
+          if (path.resolve(executable) === expectedExecutable) {
+            pids.add(pid);
+            continue;
+          }
+        } catch {}
+        try {
+          const cwd = await fsPromises.readlink(path.join("/proc", String(pid), "cwd"));
+          if (path.resolve(cwd) === runnerDirAbsolute) pids.add(pid);
+        } catch {}
+      }
+      return [...pids];
+    }
+
+    // If procps is unavailable, retain a /proc fallback for standard Linux hosts.
+    if (!result.stderr.trim()) return [];
     const procEntries = await fsPromises.readdir("/proc").catch(() => []);
-    const runnerExecutable = path.join(runnerDir, "bin", "Runner.Listener");
-    const expectedExecutable = await fsPromises.realpath(runnerExecutable).catch(() => path.resolve(runnerExecutable));
     for (const entry of procEntries) {
       if (!/^\d+$/.test(entry)) continue;
       try {
-        const executable = await fsPromises.readlink(path.join("/proc", entry, "exe"));
-        if (path.resolve(executable) === expectedExecutable) return true;
+        const executable = (await fsPromises.readlink(path.join("/proc", entry, "exe"))).replace(/ \(deleted\)$/, "");
+        if (path.resolve(executable) === expectedExecutable) pids.add(Number(entry));
       } catch {}
     }
-    return false;
+    return [...pids];
   }
 
   const result = await execCommand("pgrep", ["-af", "Runner.Listener"]);
-  if (result.exitCode !== 0 || !result.stdout.trim()) return false;
+  if (result.exitCode !== 0 || !result.stdout.trim()) return [];
   const expectedExecutable = path.resolve(runnerDir, "bin", "Runner.Listener");
-  return result.stdout.split(/\r?\n/).some((line) => line.includes(expectedExecutable));
+  return result.stdout.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    return match?.[1] && match[2]?.includes(expectedExecutable) ? [Number.parseInt(match[1], 10)] : [];
+  });
 }
 
 /**
@@ -789,14 +897,14 @@ export async function tailRunnerLogs(options: {
   runnerDir?: string;
 } = {}): Promise<void> {
   const runnerDir = options.runnerDir || DEFAULT_RUNNER_DIR;
+  const linesCount = Math.max(1, Math.min(10000, Math.floor(options.lines || 50)));
   const metadata = await readLocalMetadata(options.baseDir);
   const localMeta = metadataMatchesRunner(metadata, runnerDir) ? metadata : null;
   if (localMeta?.mode === "docker") {
-    await tailDockerRunnerLogs(localMeta.containerName, options.follow);
+    await tailDockerRunnerLogs(localMeta.containerName, options.follow, linesCount);
     return;
   }
 
-  const linesCount = Math.max(1, Math.min(10000, Math.floor(options.lines || 50)));
   if (process.platform !== "win32") {
     const serviceFile = path.join(runnerDir, ".service");
     if (!fs.existsSync(serviceFile)) {

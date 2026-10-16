@@ -4,14 +4,23 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { DEFAULT_RUNNER_DIR } from "../src/config/constants.js";
-const { execCommandMock } = vi.hoisted(() => ({ execCommandMock: vi.fn() }));
+const { execCommandMock, execInteractiveMock } = vi.hoisted(() => ({
+  execCommandMock: vi.fn(),
+  execInteractiveMock: vi.fn(),
+}));
 vi.mock("../src/utils/exec.js", () => ({
   execCommand: execCommandMock,
-  execInteractive: vi.fn(),
+  execInteractive: execInteractiveMock,
 }));
 import {
   metadataMatchesRunner,
+  readMetadataForRunner,
   runForeground,
+  startService,
+  stopService,
+  getRunnerStatus,
+  restartService,
+  tailRunnerLogs,
   listRunnerProcesses,
   writeRunnerLogChunk,
   type RunnerMetadata,
@@ -50,6 +59,21 @@ describe("Runner metadata routing", () => {
     expect(metadataMatchesRunner(localMetadata, runnerDir)).toBe(true);
     expect(metadataMatchesRunner(localMetadata, DEFAULT_RUNNER_DIR)).toBe(false);
   });
+
+  it("does not route global Docker metadata to a different requested directory", async () => {
+    const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-metadata-"));
+    const customRunnerDir = path.join(baseDir, "missing-runner");
+    await fs.writeFile(path.join(baseDir, "dgrunner-meta.json"), JSON.stringify(
+      metadata({ mode: "docker", runnerDir: "docker:test-runner", containerName: "test-runner" })
+    ));
+
+    try {
+      await expect(readMetadataForRunner(customRunnerDir, baseDir)).resolves.toBeNull();
+      await expect(readMetadataForRunner(DEFAULT_RUNNER_DIR, baseDir)).resolves.toMatchObject({ mode: "docker" });
+    } finally {
+      await fs.rm(baseDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Foreground runner and live log handling", () => {
@@ -76,19 +100,139 @@ describe("Foreground runner and live log handling", () => {
     if (process.platform === "win32") return;
     const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-active-"));
     await fs.writeFile(path.join(runnerDir, "svc.sh"), "");
-    execCommandMock.mockResolvedValueOnce({
-      exitCode: 0,
-      stdout: "active (running)",
-      stderr: "",
-    });
+    await fs.writeFile(path.join(runnerDir, ".service"), "actions.runner.example.service\n");
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "active (running)", stderr: "" });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     try {
       await expect(runForeground(runnerDir)).resolves.toBe(1);
-      expect(execCommandMock).toHaveBeenCalledOnce();
+      expect(execCommandMock).toHaveBeenCalledTimes(2);
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("already running"));
     } finally {
       errorSpy.mockRestore();
+      execCommandMock.mockReset();
+      await fs.rm(runnerDir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a foreground Windows listener before starting another instance", async () => {
+    if (process.platform !== "win32") return;
+    const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-start-active-"));
+    execCommandMock.mockResolvedValue({ exitCode: 0, stdout: "24680", stderr: "" });
+
+    try {
+      await expect(startService(runnerDir)).resolves.toMatchObject({
+        success: true,
+        message: "Runner is already running with PID 24680.",
+      });
+      expect(execCommandMock.mock.calls[0]?.[2]?.env).toMatchObject({
+        DGRUNNER_EXECUTABLE: path.resolve(runnerDir, "bin", "Runner.Listener.exe"),
+      });
+    } finally {
+      execCommandMock.mockReset();
+      await fs.rm(runnerDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops a foreground Windows listener even when no PID file exists", async () => {
+    if (process.platform !== "win32") return;
+    const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-stop-active-"));
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "13579", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+
+    try {
+      await expect(stopService(runnerDir)).resolves.toMatchObject({ success: true, message: "Runner process stopped." });
+      expect(execCommandMock.mock.calls[1]?.[0]).toBe("taskkill.exe");
+      expect(execCommandMock.mock.calls[1]?.[1]).toEqual(["/pid", "13579", "/t", "/f"]);
+    } finally {
+      execCommandMock.mockReset();
+      await fs.rm(runnerDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an active foreground Windows listener in status using a relative directory", async () => {
+    if (process.platform !== "win32") return;
+    const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-status-active-"));
+    const relativeRunnerDir = path.relative(process.cwd(), runnerDir);
+    execCommandMock.mockResolvedValue({ exitCode: 0, stdout: "97531", stderr: "" });
+
+    try {
+      const status = await getRunnerStatus(relativeRunnerDir);
+      expect(status.serviceRunning).toBe(true);
+      expect(status.activePid).toBe(97531);
+      expect(execCommandMock.mock.calls[0]?.[2]?.env).toMatchObject({
+        DGRUNNER_EXECUTABLE: path.resolve(relativeRunnerDir, "bin", "Runner.Listener.exe"),
+      });
+    } finally {
+      execCommandMock.mockReset();
+      await fs.rm(runnerDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not restart if stopping a Windows runner fails", async () => {
+    if (process.platform !== "win32") return;
+    const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-restart-failure-"));
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "11223", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "Access is denied." })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+
+    try {
+      const result = await restartService(runnerDir);
+      expect(result).toMatchObject({ success: false, message: "Access is denied." });
+      expect(execCommandMock).toHaveBeenCalledTimes(3);
+      expect(execCommandMock.mock.calls.some(([cmd]) => cmd === "taskkill.exe")).toBe(true);
+    } finally {
+      execCommandMock.mockReset();
+      await fs.rm(runnerDir, { recursive: true, force: true });
+    }
+  });
+
+  it("forwards Docker log line limits and follow mode", async () => {
+    const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-docker-logs-"));
+    await fs.writeFile(path.join(baseDir, "dgrunner-meta.json"), JSON.stringify(
+      metadata({ mode: "docker", runnerDir: "docker:test-runner", containerName: "test-runner" })
+    ));
+    execInteractiveMock.mockResolvedValue(0);
+
+    try {
+      await tailRunnerLogs({ runnerDir: DEFAULT_RUNNER_DIR, baseDir, follow: true, lines: 17 });
+      expect(execInteractiveMock).toHaveBeenCalledWith(
+        "docker",
+        ["logs", "--tail", "17", "-f", "test-runner"]
+      );
+    } finally {
+      execInteractiveMock.mockReset();
+      await fs.rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects Linux runner processes with pgrep when /proc executable access is denied", async () => {
+    if (process.platform !== "linux") return;
+    const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-proc-fallback-"));
+    const originalReadlink = fs.readlink;
+    vi.spyOn(fs, "readlink").mockImplementation(async (target, ...args) => {
+      const targetPath = String(target);
+      if (targetPath === "/proc/321/exe") throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      if (targetPath === "/proc/321/cwd") return runnerDir;
+      return originalReadlink(target as any, ...(args as any));
+    });
+    execCommandMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: "321 ./bin/Runner.Listener run",
+      stderr: "",
+    });
+
+    try {
+      const status = await getRunnerStatus(runnerDir);
+      expect(status.serviceRunning).toBe(true);
+      expect(status.activePid).toBe(321);
+      expect(execCommandMock).toHaveBeenCalledWith("pgrep", ["-af", "Runner.Listener"]);
+    } finally {
+      vi.restoreAllMocks();
       execCommandMock.mockReset();
       await fs.rm(runnerDir, { recursive: true, force: true });
     }

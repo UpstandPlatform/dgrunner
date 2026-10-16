@@ -4,6 +4,7 @@ import { getFreeDiskBytes } from "../utils/fs.js";
 import { DEFAULT_BASE_DIR, MINIMUM_FREE_DISK_BYTES } from "../config/constants.js";
 import { inspectDockerSecurity, isSuperUser } from "./security.js";
 import { resolveGitBashDir } from "./runner-manager.js";
+import { getInstalledWslDistroDetails } from "./wsl.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -132,7 +133,7 @@ export async function runDoctorChecks(
       message: `Installed (${gitRes.stdout})`,
     });
 
-    if (platform === "win32" && !isDockerMode) {
+    if (platform === "win32" && targetEnv !== "docker" && targetEnv !== "wsl") {
       const gitBashDir = await resolveGitBashDir();
       if (gitBashDir) {
         checks.push({
@@ -163,6 +164,75 @@ export async function runDoctorChecks(
         : "Git is not installed or not in system PATH.",
       remediation: "Install Git from https://git-scm.com and ensure it is available in PATH.",
     });
+  }
+
+  if (targetEnv === "wsl") {
+    if (platform !== "win32") {
+      checks.push({
+        id: "wsl-cli",
+        name: "Windows Subsystem for Linux",
+        status: "fail",
+        message: "WSL runner checks must be run from a Windows host.",
+        remediation: "Run 'dgrunner doctor --env wsl' from Windows PowerShell or Command Prompt.",
+      });
+    } else {
+      const wslCommand = await execCommand("where.exe", ["wsl.exe"]);
+      if (wslCommand.exitCode !== 0) {
+        checks.push({
+          id: "wsl-cli",
+          name: "Windows Subsystem for Linux",
+          status: "fail",
+          message: "wsl.exe was not found on PATH.",
+          detail: wslCommand.stderr || wslCommand.stdout,
+          remediation: "Install or enable WSL with 'wsl --install', then restart Windows if prompted.",
+        });
+      } else {
+        checks.push({
+          id: "wsl-cli",
+          name: "Windows Subsystem for Linux",
+          status: "pass",
+          message: `wsl.exe is available at ${wslCommand.stdout.split(/\r?\n/)[0]?.trim() || "a PATH location"}`,
+        });
+
+        const distros = await getInstalledWslDistroDetails();
+        if (distros === null) {
+          checks.push({
+            id: "wsl-distros",
+            name: "WSL2 Linux Distributions",
+            status: "fail",
+            message: "Could not query installed WSL distributions.",
+            remediation: "Run 'wsl --status' and resolve any WSL installation or virtualization errors.",
+          });
+        } else {
+          const wsl2Distros = distros.filter((distro) => distro.version === 2);
+          if (wsl2Distros.length > 0) {
+            checks.push({
+              id: "wsl-distros",
+              name: "WSL2 Linux Distributions",
+              status: "pass",
+              message: `WSL2 distribution${wsl2Distros.length === 1 ? "" : "s"} available: ${wsl2Distros.map((distro) => distro.name).join(", ")}`,
+            });
+          } else if (distros.length > 0) {
+            checks.push({
+              id: "wsl-distros",
+              name: "WSL2 Linux Distributions",
+              status: "fail",
+              message: "Installed WSL distributions are using WSL 1.",
+              detail: `Detected: ${distros.map((distro) => `${distro.name} (WSL ${distro.version})`).join(", ")}`,
+              remediation: "Enable virtualization and convert a distribution with 'wsl --set-version <distro> 2'.",
+            });
+          } else {
+            checks.push({
+              id: "wsl-distros",
+              name: "WSL2 Linux Distributions",
+              status: "warn",
+              message: "No WSL2 Linux distribution was detected.",
+              remediation: "Install a distribution with 'wsl --install -d Ubuntu' and ensure WSL 2 virtualization requirements are enabled.",
+            });
+          }
+        }
+      }
+    }
   }
 
   // 4. Docker Installation & Security

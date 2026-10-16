@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   isWsl,
   detectLinuxDistro,
+  parseInstalledWslDistroDetails,
   getInstalledWslDistros,
   getAvailableOnlineWslDistros,
 } from "../src/core/wsl.js";
@@ -41,5 +42,16 @@ describe("WSL & Linux Distro Module", () => {
       expect(online.length).toBeGreaterThan(0);
       expect(online.some((d) => d.toLowerCase().includes("ubuntu"))).toBe(true);
     }
+  });
+
+  it("parses WSL distro versions and ignores Docker Desktop internal distros", () => {
+    const distros = parseInstalledWslDistroDetails(
+      "  NAME                   STATE           VERSION\r\n* Ubuntu-24.04           Running         2\r\n  Debian                 Stopped         1\r\n  docker-desktop         Stopped         2\r\n"
+    );
+
+    expect(distros).toEqual([
+      { name: "Ubuntu-24.04", state: "Running", version: 2 },
+      { name: "Debian", state: "Stopped", version: 1 },
+    ]);
   });
 });
