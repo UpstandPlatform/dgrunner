@@ -107,7 +107,8 @@ export function registerServiceCommands(program: Command): void {
         const pidStr = String(p.pid).padEnd(8);
         const nameStr = p.name.padEnd(18);
         const runnerStr = (p.runnerName || "dgrunner").padEnd(20);
-        const memStr = (p.memoryMb ? `${p.memoryMb} MB` : "N/A").padEnd(10);
+        const hasMemory = typeof p.memoryMb === "number" && Number.isFinite(p.memoryMb);
+        const memStr = (hasMemory ? `${p.memoryMb} MB` : "N/A").padEnd(10);
         const statusStr = pc.green(p.status.padEnd(12));
         const urlStr = pc.cyan(p.targetUrl || "N/A");
         console.log(`${pidStr} ${nameStr} ${runnerStr} ${memStr} ${statusStr} ${urlStr}`);

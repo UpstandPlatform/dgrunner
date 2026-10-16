@@ -626,6 +626,40 @@ export interface ActiveProcessInfo {
   status: string;
 }
 
+function parseDockerMemoryMb(memoryUsage: string): number | undefined {
+  const currentUsage = memoryUsage.split("/", 1)[0]?.trim();
+  const match = currentUsage?.match(/^(\d+(?:\.\d+)?)\s*(B|kB|KB|KiB|MB|MiB|GB|GiB|TB|TiB)$/i);
+  if (!match?.[1] || !match[2]) return undefined;
+
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return undefined;
+
+  const bytesPerUnit: Record<string, number> = {
+    b: 1,
+    kb: 1_000,
+    kib: 1_024,
+    mb: 1_000_000,
+    mib: 1_024 ** 2,
+    gb: 1_000_000_000,
+    gib: 1_024 ** 3,
+    tb: 1_000_000_000_000,
+    tib: 1_024 ** 4,
+  };
+  const bytes = value * bytesPerUnit[match[2].toLowerCase()];
+  return Number.isFinite(bytes) ? Math.round(bytes / (1_024 ** 2)) : undefined;
+}
+
+async function readLinuxProcessMemoryMb(pid: number): Promise<number | undefined> {
+  try {
+    const status = await fsPromises.readFile(`/proc/${pid}/status`, "utf-8");
+    const match = status.match(/^VmRSS:\s+(\d+)\s+kB$/m);
+    if (!match?.[1]) return undefined;
+    return Math.round(Number(match[1]) / 1_024);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Runs the runner attached in the foreground, streaming stdout/stderr in real time.
  */
@@ -794,21 +828,53 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
     const dockerPs = await execCommand("docker", [
       "ps",
       "--filter", "name=upstand-dgrunner",
-      "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}",
+      "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}",
     ]);
     if (dockerPs.exitCode === 0 && dockerPs.stdout.trim()) {
       const lines = dockerPs.stdout.split(/\r?\n/).filter(Boolean);
+      const containers: Array<{ id: string; name: string; status: string }> = [];
       for (const line of lines) {
-        const [id, name, status, image] = line.split("\t");
+        const [id, name, status] = line.split("\t");
         if (id && name) {
-          results.push({
-            pid: id.slice(0, 12),
-            name: `${name} (docker)`,
-            runnerName: localMeta?.name || name,
-            targetUrl: localMeta?.url || targetUrl,
-            status: status || "Up (healthy)",
-          });
+          containers.push({ id, name, status: status || "Up (healthy)" });
         }
+      }
+
+      const memoryByContainer = new Map<string, number>();
+      if (containers.length > 0) {
+        const dockerStats = await execCommand("docker", [
+          "stats",
+          "--no-stream",
+          "--format",
+          "{{.ID}}\t{{.MemUsage}}",
+          ...containers.map((container) => container.id),
+        ], { timeoutMs: 5_000 });
+        if (dockerStats.exitCode === 0 && dockerStats.stdout.trim()) {
+          for (const line of dockerStats.stdout.split(/\r?\n/).filter(Boolean)) {
+            const [statsId, memoryUsage] = line.split("\t");
+            if (!statsId || !memoryUsage) continue;
+            const container = containers.find(({ id, name }) => {
+              const normalizedStatsId = statsId.toLowerCase();
+              const normalizedId = id.toLowerCase();
+              return normalizedId.startsWith(normalizedStatsId) ||
+                normalizedStatsId.startsWith(normalizedId) ||
+                name.toLowerCase() === normalizedStatsId;
+            });
+            const memoryMb = parseDockerMemoryMb(memoryUsage);
+            if (container && memoryMb !== undefined) memoryByContainer.set(container.id, memoryMb);
+          }
+        }
+      }
+
+      for (const container of containers) {
+        results.push({
+          pid: container.id.slice(0, 12),
+          name: `${container.name} (docker)`,
+          runnerName: localMeta?.name || container.name,
+          targetUrl: localMeta?.url || targetUrl,
+          memoryMb: memoryByContainer.get(container.id),
+          status: container.status,
+        });
       }
     }
   } catch {}
@@ -840,18 +906,28 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
     const res = await execCommand("pgrep", ["-a", "Runner.Listener"]);
     if (res.exitCode === 0 && res.stdout.trim()) {
       const lines = res.stdout.split(/\r?\n/).filter(Boolean);
+      const processes: Array<{ pid: number; name: string }> = [];
       for (const line of lines) {
         const parts = line.trim().split(/\s+/);
         const pid = parseInt(parts[0], 10);
         if (!isNaN(pid)) {
-          results.push({
-            pid,
-            name: "Runner.Listener",
-            runnerName,
-            targetUrl,
-            status: "Listening",
-          });
+          processes.push({ pid, name: "Runner.Listener" });
         }
+      }
+      const processMemory = await Promise.all(processes.map(async ({ pid }) => [
+        pid,
+        await readLinuxProcessMemoryMb(pid),
+      ] as const));
+      const memoryByPid = new Map(processMemory);
+      for (const runnerProcess of processes) {
+        results.push({
+          pid: runnerProcess.pid,
+          name: runnerProcess.name,
+          runnerName,
+          targetUrl,
+          memoryMb: memoryByPid.get(runnerProcess.pid),
+          status: "Listening",
+        });
       }
     }
   }

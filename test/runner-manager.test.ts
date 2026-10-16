@@ -76,6 +76,62 @@ describe("Runner metadata routing", () => {
   });
 });
 
+describe("Runner process memory reporting", () => {
+  it("includes Docker container memory from a non-streaming stats snapshot", async () => {
+    const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-process-list-"));
+    execCommandMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: "abc123def456\tupstand-dgrunner-linux\tUp 8 seconds",
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: "abc123def456\t57.2MiB / 7.7GiB",
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "" });
+
+    try {
+      const processes = await listRunnerProcesses(runnerDir);
+      expect(processes[0]).toMatchObject({
+        pid: "abc123def456",
+        memoryMb: 57,
+        status: "Up 8 seconds",
+      });
+      expect(execCommandMock.mock.calls[1]).toEqual([
+        "docker",
+        ["stats", "--no-stream", "--format", "{{.ID}}\t{{.MemUsage}}", "abc123def456"],
+        { timeoutMs: 5_000 },
+      ]);
+    } finally {
+      execCommandMock.mockReset();
+      await fs.rm(runnerDir, { recursive: true, force: true });
+    }
+  });
+
+  it("includes Linux host process resident memory when procfs exposes it", async () => {
+    if (process.platform !== "linux") return;
+    const runnerDir = await fs.mkdtemp(path.join(os.tmpdir(), "dgrunner-process-memory-"));
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "docker unavailable" })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: `${process.pid} Runner.Listener`,
+        stderr: "",
+      });
+
+    try {
+      const processes = await listRunnerProcesses(runnerDir);
+      expect(processes[0]?.pid).toBe(process.pid);
+      expect(processes[0]?.memoryMb).toEqual(expect.any(Number));
+    } finally {
+      execCommandMock.mockReset();
+      await fs.rm(runnerDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Foreground runner and live log handling", () => {
   it("reports only the runner executable name when Linux pgrep returns a full path", async () => {
     if (process.platform === "win32") return;
