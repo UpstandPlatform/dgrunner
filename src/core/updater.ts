@@ -255,8 +255,14 @@ export async function runUpgrade(options: UpgradeOptions = {}): Promise<UpgradeR
     logger.warn("You appear to be running dgrunner via npx.");
     console.log(pc.dim("  To execute the new release directly with npx:"));
     console.log(`  ${pc.cyan(`npx ${NPM_PACKAGE_NAME}@${tag}`)}\n`);
-    console.log(pc.dim("  Or install globally with:"));
+    console.log(pc.dim("  To install it globally, run:"));
     console.log(`  ${pc.cyan(upgradeCmd.display)}\n`);
+    return {
+      currentVersion,
+      latestVersion,
+      updateAvailable,
+      upgraded: false,
+    };
   }
 
   logger.step(1, 1, `Upgrading ${NPM_PACKAGE_NAME} from v${currentVersion} to v${latestVersion}...`);

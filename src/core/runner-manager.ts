@@ -4,6 +4,8 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
+import spawn from "cross-spawn";
 import { DEFAULT_BASE_DIR, DEFAULT_RUNNER_DIR } from "../config/constants.js";
 import { execCommand, execInteractive } from "../utils/exec.js";
 import {
@@ -572,9 +574,14 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
     return 0;
   }
 
-  await ensureRunnerEnvironment(runnerDir);
+  const runnerStatus = await getRunnerStatus(runnerDir);
+  if (runnerStatus.serviceRunning || await hasRunnerListenerProcess(runnerDir)) {
+    console.error("The runner is already running in the background. Stop it with 'dgrunner stop' before attaching.");
+    console.error("Use 'dgrunner logs --follow' to view the active runner logs.");
+    return 1;
+  }
 
-  const { spawn } = await import("node:child_process");
+  await ensureRunnerEnvironment(runnerDir);
 
   let execFile = "";
   let execArgs: string[] = [];
@@ -625,6 +632,42 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
       resolve(1);
     });
   });
+}
+
+async function hasRunnerListenerProcess(runnerDir: string): Promise<boolean> {
+  if (process.platform === "win32") {
+    const result = await execCommand("powershell.exe", ["-NoProfile", "-Command", [
+      "$expected = [IO.Path]::GetFullPath($env:DGRUNNER_EXECUTABLE)",
+      "$matches = Get-CimInstance Win32_Process | Where-Object { $_.Name -ieq 'Runner.Listener.exe' -and $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expected) }",
+      "if ($matches) { exit 0 }",
+      "exit 1",
+    ].join("; ")], {
+      env: {
+        ...process.env,
+        DGRUNNER_EXECUTABLE: path.join(runnerDir, "bin", "Runner.Listener.exe"),
+      },
+    });
+    return result.exitCode === 0;
+  }
+
+  if (process.platform === "linux") {
+    const procEntries = await fsPromises.readdir("/proc").catch(() => []);
+    const runnerExecutable = path.join(runnerDir, "bin", "Runner.Listener");
+    const expectedExecutable = await fsPromises.realpath(runnerExecutable).catch(() => path.resolve(runnerExecutable));
+    for (const entry of procEntries) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        const executable = await fsPromises.readlink(path.join("/proc", entry, "exe"));
+        if (path.resolve(executable) === expectedExecutable) return true;
+      } catch {}
+    }
+    return false;
+  }
+
+  const result = await execCommand("pgrep", ["-af", "Runner.Listener"]);
+  if (result.exitCode !== 0 || !result.stdout.trim()) return false;
+  const expectedExecutable = path.resolve(runnerDir, "bin", "Runner.Listener");
+  return result.stdout.split(/\r?\n/).some((line) => line.includes(expectedExecutable));
 }
 
 /**
@@ -695,7 +738,7 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
         if (!isNaN(pid)) {
           results.push({
             pid,
-            name: parts[1] || "Runner.Listener",
+            name: "Runner.Listener",
             runnerName,
             targetUrl,
             status: "Listening",
@@ -719,6 +762,24 @@ async function readLastLines(filePath: string, count: number): Promise<string[]>
     if (lines.length > count) lines.shift();
   }
   return lines;
+}
+
+export interface RunnerLogTailState {
+  decoder: StringDecoder;
+  pendingText: string;
+}
+
+export function writeRunnerLogChunk(label: string, chunk: Uint8Array, state: RunnerLogTailState): void {
+  const text = state.pendingText + state.decoder.write(chunk);
+  const lines = text.split(/\r?\n/);
+  state.pendingText = lines.pop() || "";
+  for (const line of lines) process.stdout.write(`[${label}] ${line}\n`);
+}
+
+export function flushRunnerLogTailState(label: string, state: RunnerLogTailState): void {
+  const pendingText = state.pendingText + state.decoder.end();
+  state.pendingText = "";
+  if (pendingText) process.stdout.write(`[${label}] ${pendingText}\n`);
 }
 
 export async function tailRunnerLogs(options: {
@@ -774,36 +835,61 @@ export async function tailRunnerLogs(options: {
 
   if (options.follow) {
     console.log("\n--- Following live logs (Press Ctrl+C to detach) ---");
-    const currentSizes = new Map<string, number>();
-    for (const log of logFiles) currentSizes.set(log.path, (await fsPromises.stat(log.path)).size);
+    const logStates = new Map<string, { size: number; decoder: StringDecoder; pendingText: string }>();
+    for (const log of logFiles) {
+      logStates.set(log.path, {
+        size: (await fsPromises.stat(log.path)).size,
+        decoder: new StringDecoder("utf8"),
+        pendingText: "",
+      });
+    }
     let polling = false;
-    const interval = setInterval(async () => {
-      if (polling) return;
+    let detached = false;
+    let pollPromise = Promise.resolve();
+
+    const poll = async () => {
+      if (polling || detached) return;
       polling = true;
       try {
         for (const log of logFiles) {
+          if (detached) break;
           const stats = await fsPromises.stat(log.path);
-          let currentSize = currentSizes.get(log.path) || 0;
-          if (stats.size < currentSize) currentSize = 0;
-          if (stats.size > currentSize) {
-            const stream = fs.createReadStream(log.path, { start: currentSize, end: stats.size - 1 });
-            stream.on("data", (chunk) => {
-              process.stdout.write(`[${log.label}] ${chunk.toString()}`);
-            });
-            currentSizes.set(log.path, stats.size);
+          const state = logStates.get(log.path)!;
+          if (stats.size < state.size) {
+            flushRunnerLogTailState(log.label, state);
+            state.size = 0;
+            state.decoder = new StringDecoder("utf8");
+          }
+          if (stats.size > state.size) {
+            const stream = fs.createReadStream(log.path, { start: state.size, end: stats.size - 1 });
+            for await (const chunk of stream) {
+              writeRunnerLogChunk(log.label, chunk, state);
+            }
+            state.size = stats.size;
           }
         }
       } catch {} finally {
         polling = false;
       }
+    };
+
+    const interval = setInterval(() => {
+      if (!polling && !detached) pollPromise = poll();
     }, 1000);
 
     await new Promise<void>((resolve) => {
       const detach = () => {
+        detached = true;
         clearInterval(interval);
         process.off("SIGINT", detach);
-        console.log("\nDetached from runner logs.");
-        resolve();
+        void pollPromise.finally(() => {
+          for (const log of logFiles) {
+            const state = logStates.get(log.path)!;
+            flushRunnerLogTailState(log.label, state);
+          }
+          console.log("\nDetached from runner logs.");
+          resolve();
+        });
       };
       process.once("SIGINT", detach);
     });

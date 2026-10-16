@@ -19,6 +19,8 @@ import {
   DEFAULT_DOCKER_RUNNER_IMAGE,
   DOCKER_DISTRO_PRESETS,
   getDockerRunnerStatus,
+  getDockerRunnerWorkVolumeName,
+  removeDockerRunner,
 } from "../src/core/docker-runner.js";
 
 describe("Docker Runner Module", () => {
@@ -30,6 +32,14 @@ describe("Docker Runner Module", () => {
   it("should have official runner image and container defaults", () => {
     expect(DEFAULT_CONTAINER_NAME).toBe("upstand-dgrunner-linux");
     expect(DEFAULT_DOCKER_RUNNER_IMAGE).toBe("ghcr.io/actions/actions-runner:latest");
+  });
+
+  it("uses isolated, deterministic work volumes for each runner container", () => {
+    const first = getDockerRunnerWorkVolumeName("runner-one");
+    const second = getDockerRunnerWorkVolumeName("runner-two");
+    expect(first).toMatch(/^dgrunner-work-[a-f0-9]{16}$/);
+    expect(second).not.toBe(first);
+    expect(getDockerRunnerWorkVolumeName("runner-one")).toBe(first);
   });
 
   it("should define standard Linux distribution presets for Docker", () => {
@@ -61,6 +71,7 @@ describe("Docker Runner Module", () => {
   it("does not mount the host Docker socket or expose the registration token by default", async () => {
     execCommandMock
       .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "not found" })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "Error: no such volume" })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "container-id", stderr: "" })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "configured", stderr: "" });
     const token = "runner-token-value-123456";
@@ -79,6 +90,8 @@ describe("Docker Runner Module", () => {
     expect(runCall).toBeDefined();
     expect(runCall?.[1]).not.toContain("/var/run/docker.sock:/var/run/docker.sock");
     expect(runCall?.[1]).not.toContain(token);
+    expect(runCall?.[1]).toContain(getDockerRunnerWorkVolumeName("test-runner") + ":/home/runner/_work");
+    expect(runCall?.[1]).not.toContain("dgrunner-linux-work:/home/runner/_work");
     expect(runCall?.[1]?.join(" ")).toContain("chown -R");
     expect(runCall?.[1]?.join(" ")).toContain("/home/runner/_work/_tool");
     expect(configureCall?.[1]).not.toContain(token);
@@ -88,6 +101,7 @@ describe("Docker Runner Module", () => {
   it("mounts the host Docker socket only when explicitly requested", async () => {
     execCommandMock
       .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "not found" })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "Error: no such volume" })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "container-id", stderr: "" })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "configured", stderr: "" });
 
@@ -101,6 +115,24 @@ describe("Docker Runner Module", () => {
     expect(result.success).toBe(true);
     const runCall = execCommandMock.mock.calls.find((call) => call[1]?.[0] === "run");
     expect(runCall?.[1]).toContain("/var/run/docker.sock:/var/run/docker.sock");
+  });
+
+  it("removes its workspace volume after successful runner removal", async () => {
+    execCommandMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '{"Running":true,"Status":"running"}', stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "unregistered", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "test-runner", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '[{"Name":"dgrunner-work-0000000000000000"}]', stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "dgrunner-work-0000000000000000", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "Error: no such volume" });
+
+    const result = await removeDockerRunner("runner-token", "test-runner");
+
+    expect(result.success).toBe(true);
+    expect(execCommandMock.mock.calls.map((call) => call[1])).toContainEqual([
+      "volume", "rm", getDockerRunnerWorkVolumeName("test-runner"),
+    ]);
   });
 });
 

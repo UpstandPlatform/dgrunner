@@ -29,7 +29,7 @@ docker inspect --format '{{json .Mounts}}' upstand-dgrunner-linux
 docker exec --user runner upstand-dgrunner-linux sh -lc 'id; test -w /home/runner/_work && test -w /home/runner/_work/_tool && echo writable'
 ~~~
 
-The `dgrunner-linux-work` named volume is mounted at `/home/runner/_work` inside the container. Do not inspect or repair a host `/home/runner` path unless the runner is actually native Linux on that host. Redact registration tokens, credentials, and secrets before sharing logs.
+An isolated named volume for that runner is mounted at `/home/runner/_work` inside the container. It persists across container restarts and is cleared when the runner is re-registered or removed. Do not inspect or repair a host `/home/runner` path unless the runner is actually native Linux on that host. Redact registration tokens, credentials, and secrets before sharing logs.
 
 ## Repair confirmed Docker work-volume ownership problems
 

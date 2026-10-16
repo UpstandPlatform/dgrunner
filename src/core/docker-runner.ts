@@ -1,9 +1,46 @@
 import os from "node:os";
+import crypto from "node:crypto";
 import { execCommand, execInteractive } from "../utils/exec.js";
 import { saveLocalMetadata } from "./runner-manager.js";
 
 export const DEFAULT_CONTAINER_NAME = "upstand-dgrunner-linux";
 export const DEFAULT_DOCKER_RUNNER_IMAGE = "ghcr.io/actions/actions-runner:latest";
+const LEGACY_WORK_VOLUME_NAME = "dgrunner-linux-work";
+
+export function getDockerRunnerWorkVolumeName(containerName: string): string {
+  const suffix = crypto.createHash("sha256").update(containerName).digest("hex").slice(0, 16);
+  return `dgrunner-work-${suffix}`;
+}
+
+async function removeDockerVolumeIfPresent(volumeName: string): Promise<{ success: boolean; output: string }> {
+  const inspect = await execCommand("docker", ["volume", "inspect", volumeName], { timeoutMs: 10000 });
+  if (inspect.exitCode !== 0) {
+    const output = `${inspect.stdout}\n${inspect.stderr}`.trim();
+    if (/no such volume|volume .* not found/i.test(output)) return { success: true, output: "" };
+    return { success: false, output };
+  }
+
+  const remove = await execCommand("docker", ["volume", "rm", volumeName], { timeoutMs: 30000 });
+  return {
+    success: remove.exitCode === 0,
+    output: `${remove.stdout}\n${remove.stderr}`.trim(),
+  };
+}
+
+async function removeLegacyWorkVolumeIfUnused(): Promise<string | undefined> {
+  const references = await execCommand("docker", [
+    "ps", "--all", "--quiet", "--filter", `volume=${LEGACY_WORK_VOLUME_NAME}`,
+  ], { timeoutMs: 10000 });
+  if (references.exitCode !== 0) {
+    return `Could not check whether legacy workspace volume '${LEGACY_WORK_VOLUME_NAME}' is still in use: ${references.stderr || references.stdout}`.trim();
+  }
+  if (references.stdout.trim()) return undefined;
+
+  const removed = await removeDockerVolumeIfPresent(LEGACY_WORK_VOLUME_NAME);
+  return removed.success
+    ? undefined
+    : `Could not remove legacy workspace volume '${LEGACY_WORK_VOLUME_NAME}': ${removed.output}`;
+}
 
 export interface DockerDistroPreset {
   id: string;
@@ -124,6 +161,12 @@ export async function startDockerRunner(
     }
   }
 
+  const workVolume = getDockerRunnerWorkVolumeName(containerName);
+  const oldVolume = await removeDockerVolumeIfPresent(workVolume);
+  if (!oldVolume.success) {
+    return { success: false, output: `Could not clear the previous workspace volume '${workVolume}': ${oldVolume.output}` };
+  }
+
   const dockerArgs: string[] = [
     "run",
     "-d",
@@ -136,8 +179,8 @@ export async function startDockerRunner(
     dockerArgs.push("-e", "DOCKER_HOST=unix:///var/run/docker.sock");
   }
 
-  // Work volume to preserve build workspace cache across container restarts
-  dockerArgs.push("-v", "dgrunner-linux-work:/home/runner/_work");
+  // Keep workspaces across container restarts while isolating each runner registration.
+  dockerArgs.push("-v", `${workVolume}:/home/runner/_work`);
 
   // Named volumes are mounted root-owned by Docker. Repair ownership once so the
   // runner UID can create its tool cache and workspace without broad permissions.
@@ -191,6 +234,7 @@ export async function startDockerRunner(
 
   if (configure.exitCode !== 0) {
     await execCommand("docker", ["rm", "-f", containerName], { timeoutMs: 30000 });
+    await removeDockerVolumeIfPresent(workVolume);
     return {
       success: false,
       output: `${configure.stdout}\n${configure.stderr}`.trim(),
@@ -294,9 +338,27 @@ export async function removeDockerRunner(
   }
 
   const res = await execCommand("docker", ["rm", "-f", containerName], { timeoutMs: 30000 });
+  if (res.exitCode !== 0) {
+    return {
+      success: false,
+      output: `${unregister.stdout}\n${res.stdout}\n${res.stderr}`.trim(),
+    };
+  }
+
+  const workVolume = getDockerRunnerWorkVolumeName(containerName);
+  const volumeCleanup = await removeDockerVolumeIfPresent(workVolume);
+  const legacyCleanupWarning = await removeLegacyWorkVolumeIfUnused();
+  const cleanupWarnings = [
+    !volumeCleanup.success && `Could not remove workspace volume '${workVolume}': ${volumeCleanup.output}`,
+    legacyCleanupWarning,
+  ].filter(Boolean);
+
   return {
-    success: res.exitCode === 0,
-    output: `${unregister.stdout}\n${res.stdout}\n${res.stderr}`.trim(),
+    success: true,
+    output: [
+      `${unregister.stdout}\n${res.stdout}\n${res.stderr}`.trim(),
+      ...cleanupWarnings.map((warning) => `Warning: ${warning}`),
+    ].filter(Boolean).join("\n"),
   };
 }
 

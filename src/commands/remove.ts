@@ -62,6 +62,7 @@ export function registerRemoveCommand(program: Command): void {
 
       if (res.success) {
         logger.success("Runner successfully unregistered from GitHub and removed!");
+        if (res.output) console.log(res.output);
       } else {
         logger.error("Failed to remove runner from GitHub.");
         console.error(res.output);

@@ -12,4 +12,23 @@ describe("Setup command options", () => {
     expect(serviceOption).toBeDefined();
     expect(serviceOption?.defaultValue).toBeUndefined();
   });
+
+  it("restricts --env to supported runner environments", () => {
+    const program = new Command();
+    registerSetupCommand(program);
+    const setup = program.commands.find((command) => command.name() === "setup");
+    const environmentOption = setup?.options.find((option) => option.long === "--env");
+
+    expect(environmentOption?.argChoices).toEqual(["windows", "docker", "wsl", "native"]);
+  });
+
+  it("rejects an invalid --env value during CLI parsing", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    registerSetupCommand(program);
+
+    await expect(program.parseAsync(["node", "dgrunner", "setup", "--env", "dockr"]))
+      .rejects.toThrow();
+  });
 });

@@ -269,7 +269,7 @@ When running `dgrunner setup` on Windows, you can choose between:
    - Distro labels (`ubuntu`, `ubuntu-24.04`, `ubuntu-22.04`, `debian`) are automatically injected into runner labels.
    - Runs genuine Linux/Bash jobs on your Windows machine with automatic restart (`--restart unless-stopped`).
    - Does not mount the host Docker socket by default. Use `--docker-socket` only when workflows need it; access to that socket can grant control of the Docker host.
-   - Preserves build caches across runs in a dedicated volume (`dgrunner-linux-work`).
+   - Preserves build caches across container restarts in a dedicated, runner-isolated volume. Re-registering or removing the runner clears its workspace volume.
 3. **WSL2 Linux Environment**
    - Automatically detects all installed WSL distributions (`Ubuntu`, `Debian`, etc.) and allows selecting or installing a new distribution directly from Microsoft Store (`Ubuntu-24.04`, `Debian`, `kali-linux`, `archlinux`).
    - Dynamically identifies distribution details from `/etc/os-release` and tags labels accordingly.
@@ -581,7 +581,7 @@ If you want to run Linux runners on Windows, you have two great options:
 
 ### Docker: Runner Tool Cache Permissions
 
-If a job fails with `UnauthorizedAccessException` or `Permission denied` for `/home/runner/_work/_tool`, the runner worker could not create its tool cache before normal workflow steps started. In Docker mode, this path is inside the runner container and backed by the `dgrunner-linux-work` named volume; it is not a VPS path.
+If a job fails with `UnauthorizedAccessException` or `Permission denied` for `/home/runner/_work/_tool`, the runner worker could not create its tool cache before normal workflow steps started. In Docker mode, this path is inside the runner container and backed by a runner-isolated named volume; it is not a VPS path. The volume persists across container restarts and is cleared when the runner is re-registered or removed.
 
 The official runner image runs as the unprivileged `runner` account. If Docker created the named volume as root, repair only the mounted work directory from the host:
 

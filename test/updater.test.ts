@@ -1,9 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
+const { execCommandMock } = vi.hoisted(() => ({ execCommandMock: vi.fn() }));
+vi.mock("../src/utils/exec.js", () => ({
+  execCommand: execCommandMock,
+  execInteractive: vi.fn(),
+}));
 import {
   compareSemver,
   getUpgradeCommand,
   detectPackageManager,
   fetchLatestVersion,
+  runUpgrade,
 } from "../src/core/updater.js";
 
 describe("Updater Module", () => {
@@ -92,5 +98,25 @@ describe("Updater Module", () => {
         vi.unstubAllGlobals();
       }
     });
+  });
+
+  it("does not install globally when upgrade is invoked through npx", async () => {
+    const originalArgv1 = process.argv[1];
+    process.argv[1] = "C:/Users/example/.npm/_npx/123/node_modules/.bin/dgrunner";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ version: "9.9.9" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })));
+
+    try {
+      const result = await runUpgrade();
+      expect(result.updateAvailable).toBe(true);
+      expect(result.upgraded).toBe(false);
+      expect(execCommandMock).not.toHaveBeenCalled();
+    } finally {
+      process.argv[1] = originalArgv1;
+      vi.unstubAllGlobals();
+      execCommandMock.mockReset();
+    }
   });
 });

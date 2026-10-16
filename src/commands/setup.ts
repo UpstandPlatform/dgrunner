@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import pc from "picocolors";
 import { input, password, select, confirm } from "@inquirer/prompts";
 import { DEFAULT_RUNNER_DIR } from "../config/constants.js";
@@ -38,6 +38,38 @@ export interface SetupOptions {
   distro?: string;
   image?: string;
   dockerSocket?: boolean;
+}
+
+const WSL_SETUP_COMMAND = [
+  "if ! command -v npx >/dev/null 2>&1; then echo 'Node.js/npm is not installed in WSL. Please install Node.js in WSL first.' >&2; exit 127; fi",
+  'exec npx @upstand/dgrunner setup "$@"',
+].join("; ");
+
+export function buildWslSetupArgs(options: SetupOptions, distro?: string): string[] {
+  const setupArgs: string[] = [];
+  const addOption = (flag: string, value: string | undefined) => {
+    if (value !== undefined && value !== "") setupArgs.push(flag, value);
+  };
+
+  addOption("--url", options.url);
+  addOption("--token", options.token);
+  addOption("--name", options.name);
+  addOption("--labels", options.labels);
+  if (options.dir && options.dir.toLowerCase() !== DEFAULT_RUNNER_DIR.toLowerCase()) {
+    addOption("--dir", options.dir);
+  }
+  if (options.force) setupArgs.push("--force");
+  if (options.service === false) setupArgs.push("--no-service");
+
+  return [
+    ...(distro ? ["-d", distro] : []),
+    "bash",
+    "-l",
+    "-c",
+    WSL_SETUP_COMMAND,
+    "dgrunner",
+    ...setupArgs,
+  ];
 }
 
 export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
@@ -172,22 +204,27 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       "cyan"
     );
 
-    if (isInteractive) {
-      try {
-        const launch = await confirm({
-          message: `Would you like to transfer setup to your WSL2 distribution [${distroName}] now?`,
-          default: true,
-        });
+    const wslCmdArgs = buildWslSetupArgs(options, selectedWslDistro);
+    if (!isInteractive) {
+      logger.info(`Transferring non-interactive setup into WSL2 [${distroName}]...`);
+      const exitCode = await execInteractive("wsl.exe", wslCmdArgs);
+      if (exitCode !== 0) process.exitCode = exitCode;
+      return;
+    }
 
-        if (launch) {
-          logger.info(`Transferring execution into WSL2 [${distroName}]...`);
-          const wslCmdArgs = selectedWslDistro
-            ? ["-d", selectedWslDistro, "bash", "-c", "which npx >/dev/null 2>&1 && npx @upstand/dgrunner setup || (echo 'Node.js/npm is not installed in WSL. Please install Node.js in WSL first.')"]
-            : ["bash", "-c", "which npx >/dev/null 2>&1 && npx @upstand/dgrunner setup || (echo 'Node.js/npm is not installed in WSL. Please install Node.js in WSL first.')"];
-          await execInteractive("wsl.exe", wslCmdArgs);
-          return;
-        }
-      } catch {}
+    try {
+      const launch = await confirm({
+        message: `Would you like to transfer setup to your WSL2 distribution [${distroName}] now?`,
+        default: true,
+      });
+
+      if (launch) {
+        logger.info(`Transferring execution into WSL2 [${distroName}]...`);
+        const exitCode = await execInteractive("wsl.exe", wslCmdArgs);
+        if (exitCode !== 0) process.exitCode = exitCode;
+        return;
+      }
+    } catch {
     }
     return;
   }
@@ -270,15 +307,14 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
   const runningInWsl = isWsl();
 
   if (isInteractive) {
-    const scopeChoice = await select({
-      message: "What scope are you registering this runner for?",
-      choices: [
-        { name: "Private Repository (Recommended)", value: "repo" },
-        { name: "Organization", value: "org" },
-      ],
-    });
-
     if (!targetUrl) {
+      const scopeChoice = await select({
+        message: "What scope are you registering this runner for?",
+        choices: [
+          { name: "Private Repository (Recommended)", value: "repo" },
+          { name: "Organization", value: "org" },
+        ],
+      });
       targetUrl = await input({
         message: scopeChoice === "repo"
           ? "Enter private GitHub repository URL (e.g. https://github.com/owner/repo):"
@@ -555,7 +591,8 @@ export function registerSetupCommand(program: Command): void {
     .option("-l, --labels <labels>", "Comma-separated custom runner labels")
     .option("-d, --dir <path>", "Runner installation directory", DEFAULT_RUNNER_DIR)
     .option("--os <os>", "Target runner OS: 'windows' or 'linux' (on Windows, 'linux' uses Docker container)")
-    .option("--env <environment>", "Target runner environment: 'windows', 'docker', 'wsl', or 'native'")
+    .addOption(new Option("--env <environment>", "Target runner environment: 'windows', 'docker', 'wsl', or 'native'")
+      .choices(["windows", "docker", "wsl", "native"]))
     .option("--distro <distro>", "Linux distribution preset ('ubuntu-24.04', 'ubuntu-22.04', 'debian') or WSL distro name")
     .option("--image <image>", "Custom Docker runner container image")
     .option("--docker-socket", "Mount the host Docker socket into the runner (grants workflows host-level Docker control)", false)
