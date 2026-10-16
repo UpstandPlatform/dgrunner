@@ -1,6 +1,6 @@
 # dgrunner 🚀
 
-> **Transform any PC + Docker into a hardened, persistent self-hosted GitHub Actions runner with pre-flight security validation, service management, and automated test workflows.**
+> **Set up and manage self-hosted GitHub Actions runners on Linux and Windows, in WSL or Docker—with security checks, lifecycle controls, and a verification workflow generator.**
 
 [![skills.sh](https://skills.sh/b/UpstandPlatform/dgrunner)](https://skills.sh/UpstandPlatform/dgrunner)
 
