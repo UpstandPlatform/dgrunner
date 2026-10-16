@@ -3,7 +3,6 @@ import fsPromises from "node:fs/promises";
 import path from "node:path";
 import pc from "picocolors";
 import { logger } from "../utils/logger.js";
-import { ensureDir } from "../utils/fs.js";
 
 export interface WorkflowOptions {
   runnerName?: string;
@@ -151,7 +150,7 @@ export async function writeVerificationWorkflow(
   options: WorkflowOptions = {}
 ): Promise<string> {
   const workflowsDir = path.join(projectRoot, ".github", "workflows");
-  await ensureDir(workflowsDir);
+  await fsPromises.mkdir(workflowsDir, { recursive: true });
 
   const workflowPath = path.join(workflowsDir, "verify-runner.yml");
   const yamlContent = generateVerificationWorkflowYaml(options);

@@ -3,8 +3,9 @@ import fsPromises from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { createInterface } from "node:readline";
 import { DEFAULT_BASE_DIR, DEFAULT_RUNNER_DIR } from "../config/constants.js";
-import { execCommand } from "../utils/exec.js";
+import { execCommand, execInteractive } from "../utils/exec.js";
 import {
   getDockerRunnerStatus,
   startDockerContainer,
@@ -84,6 +85,21 @@ export async function readLocalMetadata(baseDir = DEFAULT_BASE_DIR): Promise<Run
   } catch {
     return null;
   }
+}
+
+export function metadataMatchesRunner(metadata: RunnerMetadata | null, runnerDir: string): boolean {
+  if (!metadata) return false;
+  if (metadata.mode === "docker") {
+    return path.resolve(runnerDir).toLowerCase() === path.resolve(DEFAULT_RUNNER_DIR).toLowerCase();
+  }
+
+  const metadataRunnerDir = metadata.runnerDir || DEFAULT_RUNNER_DIR;
+  return path.resolve(metadataRunnerDir).toLowerCase() === path.resolve(runnerDir).toLowerCase();
+}
+
+async function readMetadataForRunner(runnerDir: string): Promise<RunnerMetadata | null> {
+  const metadata = await readLocalMetadata();
+  return metadataMatchesRunner(metadata, runnerDir) ? metadata : null;
 }
 
 export async function saveLocalMetadata(meta: RunnerMetadata, baseDir = DEFAULT_BASE_DIR): Promise<void> {
@@ -236,6 +252,8 @@ export async function installService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ 
     if (fs.existsSync(svcPath)) {
       const res = await execCommand("sudo", ["./svc.sh", "install", os.userInfo().username], {
         cwd: runnerDir,
+        stdio: ["inherit", "pipe", "pipe"],
+        timeoutMs: 120000,
       });
       if (res.exitCode === 0) {
         return { success: true, message: "Systemd persistent service installed successfully." };
@@ -250,12 +268,14 @@ export async function installService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ 
  * Starts the runner persistent service or background process.
  */
 export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
-  const localMeta = await readLocalMetadata();
+  const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
     const res = await startDockerContainer(localMeta.containerName);
     return {
       success: res.success,
-      message: res.success ? res.output : res.output,
+      message: res.success
+        ? `Docker runner container '${localMeta.containerName}' started.`
+        : res.output,
     };
   }
 
@@ -322,8 +342,15 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
 
     return { success: false, message: "Failed to spawn runner process." };
   } else {
-    // Linux svc.sh start
-    const res = await execCommand("sudo", ["./svc.sh", "start"], { cwd: runnerDir });
+    const svcPath = path.join(runnerDir, "svc.sh");
+    if (!fs.existsSync(svcPath)) {
+      return { success: false, message: `Runner service script not found at ${svcPath}` };
+    }
+    const res = await execCommand("sudo", ["./svc.sh", "start"], {
+      cwd: runnerDir,
+      stdio: ["inherit", "pipe", "pipe"],
+      timeoutMs: 120000,
+    });
     return {
       success: res.exitCode === 0,
       message: res.exitCode === 0 ? "Runner systemd service started." : (res.stderr || res.stdout),
@@ -335,7 +362,7 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
  * Stops the runner persistent service or background process.
  */
 export async function stopService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
-  const localMeta = await readLocalMetadata();
+  const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
     const res = await stopDockerRunner(localMeta.containerName);
     return {
@@ -365,8 +392,15 @@ export async function stopService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ suc
 
     return { success: true, message: "Runner service stopped." };
   } else {
-    // Linux svc.sh stop
-    const res = await execCommand("sudo", ["./svc.sh", "stop"], { cwd: runnerDir });
+    const svcPath = path.join(runnerDir, "svc.sh");
+    if (!fs.existsSync(svcPath)) {
+      return { success: false, message: `Runner service script not found at ${svcPath}` };
+    }
+    const res = await execCommand("sudo", ["./svc.sh", "stop"], {
+      cwd: runnerDir,
+      stdio: ["inherit", "pipe", "pipe"],
+      timeoutMs: 120000,
+    });
     return {
       success: res.exitCode === 0,
       message: res.exitCode === 0 ? "Runner systemd service stopped." : (res.stderr || res.stdout),
@@ -381,7 +415,7 @@ export async function removeRunner(
   runnerDir = DEFAULT_RUNNER_DIR,
   token: string
 ): Promise<{ success: boolean; output: string }> {
-  const localMeta = await readLocalMetadata();
+  const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
     const res = await removeDockerRunner(token, localMeta.containerName);
     const metaFile = getRunnerConfigFile();
@@ -399,7 +433,11 @@ export async function removeRunner(
   if (process.platform !== "win32") {
     const svcPath = path.join(runnerDir, "svc.sh");
     if (fs.existsSync(svcPath)) {
-      await execCommand("sudo", ["./svc.sh", "uninstall"], { cwd: runnerDir }).catch(() => {});
+      await execCommand("sudo", ["./svc.sh", "uninstall"], {
+        cwd: runnerDir,
+        stdio: ["inherit", "pipe", "pipe"],
+        timeoutMs: 120000,
+      }).catch(() => {});
     }
   }
 
@@ -412,7 +450,7 @@ export async function removeRunner(
   });
 
   const metaFile = getRunnerConfigFile();
-  if (result.exitCode === 0 && fs.existsSync(metaFile)) {
+  if (result.exitCode === 0 && localMeta && fs.existsSync(metaFile)) {
     try {
       fs.unlinkSync(metaFile);
     } catch {}
@@ -428,7 +466,7 @@ export async function removeRunner(
  * Gets comprehensive status of the runner.
  */
 export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<RunnerStatusInfo> {
-  const localMeta = await readLocalMetadata();
+  const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
     const dStatus = await getDockerRunnerStatus(localMeta.containerName);
     return {
@@ -467,9 +505,12 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
       }
     }
   } else {
-    // Linux svc status
-    const svcRes = await execCommand("sudo", ["./svc.sh", "status"], { cwd: runnerDir });
-    serviceRunning = svcRes.exitCode === 0 && svcRes.stdout.toLowerCase().includes("active (running)");
+    // Status is readable without sudo on systemd; avoid an unnecessary password prompt.
+    const svcPath = path.join(runnerDir, "svc.sh");
+    if (fs.existsSync(svcPath)) {
+      const svcRes = await execCommand("./svc.sh", ["status"], { cwd: runnerDir, timeoutMs: 10000 });
+      serviceRunning = svcRes.exitCode === 0 && svcRes.stdout.toLowerCase().includes("active (running)");
+    }
   }
 
   return {
@@ -478,7 +519,7 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
     runnerName: officialConfig?.runnerName || localMeta?.name,
     targetUrl: officialConfig?.serverUrl || localMeta?.url,
     labels: localMeta?.labels,
-    serviceInstalled: process.platform === "win32" ? false : configured,
+    serviceInstalled: process.platform === "win32" ? false : fs.existsSync(path.join(runnerDir, ".service")),
     serviceRunning,
     activePid,
     mode: localMeta?.mode,
@@ -515,7 +556,7 @@ export interface ActiveProcessInfo {
  * Runs the runner attached in the foreground, streaming stdout/stderr in real time.
  */
 export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<number> {
-  const localMeta = await readLocalMetadata();
+  const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
     const container = localMeta.containerName || "upstand-dgrunner-linux";
     // Check if container is running; if not, restart it
@@ -549,8 +590,8 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
       execFile = listenerExe;
       execArgs = ["run"];
     } else {
-      execFile = "cmd.exe";
-      execArgs = ["/c", path.join(runnerDir, "run.cmd")];
+      execFile = path.join(runnerDir, "run.cmd");
+      execArgs = [];
     }
   } else {
     execFile = path.join(runnerDir, "run.sh");
@@ -591,7 +632,7 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
  */
 export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promise<ActiveProcessInfo[]> {
   const officialConfig = await readOfficialRunnerConfig(runnerDir);
-  const localMeta = await readLocalMetadata();
+  const localMeta = await readMetadataForRunner(runnerDir);
   const runnerName = officialConfig?.runnerName || localMeta?.name || "dgrunner";
   const targetUrl = officialConfig?.serverUrl || localMeta?.url || "Unknown";
 
@@ -670,52 +711,101 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
 /**
  * Follows/tails runner log output.
  */
-export async function tailRunnerLogs(options: { follow?: boolean; lines?: number; baseDir?: string } = {}): Promise<void> {
-  const localMeta = await readLocalMetadata(options.baseDir);
+async function readLastLines(filePath: string, count: number): Promise<string[]> {
+  const lines: string[] = [];
+  const input = fs.createReadStream(filePath, { encoding: "utf8" });
+  for await (const line of createInterface({ input, crlfDelay: Infinity })) {
+    lines.push(line);
+    if (lines.length > count) lines.shift();
+  }
+  return lines;
+}
+
+export async function tailRunnerLogs(options: {
+  follow?: boolean;
+  lines?: number;
+  baseDir?: string;
+  runnerDir?: string;
+} = {}): Promise<void> {
+  const runnerDir = options.runnerDir || DEFAULT_RUNNER_DIR;
+  const metadata = await readLocalMetadata(options.baseDir);
+  const localMeta = metadataMatchesRunner(metadata, runnerDir) ? metadata : null;
   if (localMeta?.mode === "docker") {
     await tailDockerRunnerLogs(localMeta.containerName, options.follow);
     return;
   }
 
-  const baseDir = options.baseDir || DEFAULT_BASE_DIR;
-  const logFile = path.join(baseDir, "runner-stdout.log");
-
-  if (!fs.existsSync(logFile)) {
-    console.log("No runner log file found at " + logFile);
+  const linesCount = Math.max(1, Math.min(10000, Math.floor(options.lines || 50)));
+  if (process.platform !== "win32") {
+    const serviceFile = path.join(runnerDir, ".service");
+    if (!fs.existsSync(serviceFile)) {
+      console.log(`No installed runner service found in ${runnerDir}`);
+      return;
+    }
+    const serviceName = (await fsPromises.readFile(serviceFile, "utf8")).trim();
+    if (!serviceName) {
+      console.log(`Runner service name is empty in ${serviceFile}`);
+      return;
+    }
+    const unitName = serviceName.endsWith(".service") ? serviceName : `${serviceName}.service`;
+    const args = ["journalctl", "--no-pager", "--unit", unitName, "--lines", String(linesCount)];
+    if (options.follow) args.push("--follow");
+    const code = await execInteractive("sudo", args);
+    if (code !== 0) console.error(`Could not read runner service logs (exit code ${code}).`);
     return;
   }
 
-  const linesCount = options.lines || 50;
-  const content = await fsPromises.readFile(logFile, "utf-8");
-  const allLines = content.split(/\r?\n/);
-  const tailLines = allLines.slice(-linesCount);
-  for (const line of tailLines) {
-    console.log(line);
+  const baseDir = options.baseDir || DEFAULT_BASE_DIR;
+  const logFiles = [
+    { label: "stdout", path: path.join(baseDir, "runner-stdout.log") },
+    { label: "stderr", path: path.join(baseDir, "runner-stderr.log") },
+  ].filter(({ path: filePath }) => fs.existsSync(filePath));
+
+  if (logFiles.length === 0) {
+    console.log(`No runner log files found in ${baseDir}`);
+    return;
+  }
+
+  for (const log of logFiles) {
+    for (const line of await readLastLines(log.path, linesCount)) {
+      console.log(`[${log.label}] ${line}`);
+    }
   }
 
   if (options.follow) {
     console.log("\n--- Following live logs (Press Ctrl+C to detach) ---");
-    let currentSize = (await fsPromises.stat(logFile)).size;
-
+    const currentSizes = new Map<string, number>();
+    for (const log of logFiles) currentSizes.set(log.path, (await fsPromises.stat(log.path)).size);
+    let polling = false;
     const interval = setInterval(async () => {
+      if (polling) return;
+      polling = true;
       try {
-        const stats = await fsPromises.stat(logFile);
-        if (stats.size > currentSize) {
-          const stream = fs.createReadStream(logFile, { start: currentSize, end: stats.size });
-          stream.on("data", (chunk) => {
-            process.stdout.write(chunk.toString());
-          });
-          currentSize = stats.size;
+        for (const log of logFiles) {
+          const stats = await fsPromises.stat(log.path);
+          let currentSize = currentSizes.get(log.path) || 0;
+          if (stats.size < currentSize) currentSize = 0;
+          if (stats.size > currentSize) {
+            const stream = fs.createReadStream(log.path, { start: currentSize, end: stats.size - 1 });
+            stream.on("data", (chunk) => {
+              process.stdout.write(`[${log.label}] ${chunk.toString()}`);
+            });
+            currentSizes.set(log.path, stats.size);
+          }
         }
-      } catch {}
+      } catch {} finally {
+        polling = false;
+      }
     }, 1000);
 
     await new Promise<void>((resolve) => {
-      process.on("SIGINT", () => {
+      const detach = () => {
         clearInterval(interval);
+        process.off("SIGINT", detach);
         console.log("\nDetached from runner logs.");
         resolve();
-      });
+      };
+      process.once("SIGINT", detach);
     });
   }
 }

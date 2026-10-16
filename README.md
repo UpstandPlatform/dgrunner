@@ -94,7 +94,7 @@ GitHub advises against using self-hosted runners on public repositories because 
 4. **Binary Tamper Protection (SHA-256)**
    - All runner binaries are downloaded directly from official GitHub releases and cryptographically verified against official SHA-256 checksums before extraction.
 5. **Ephemeral Secrets**
-   - Short-lived runner registration and removal tokens are entered via masked password prompts, used only in memory during configuration, and never logged or persisted to disk.
+   - Short-lived runner tokens are entered via masked prompts and are not logged or persisted by dgrunner. Native runner configuration passes the registration token to GitHub's configuration process as a command-line argument, so local process inspection may expose it briefly; avoid supplying tokens with `--token`. Docker configuration sends the token over stdin.
 6. **Filesystem Permission Hardening**
    - Directories and local metadata files are created with restricted POSIX permissions (`0700` / `0600`).
 
@@ -245,6 +245,7 @@ Runs a battery of system diagnostics and security audits:
 dgrunner doctor
 dgrunner doctor --strict        # Exits with code 1 if warnings or errors exist
 dgrunner doctor --dir ~/runner  # Check specific installation path
+dgrunner doctor --env docker    # Evaluate checks for a planned Docker runner
 ```
 
 ---
@@ -311,7 +312,7 @@ dgrunner setup \
 
 **Options:**
 - `-u, --url <url>`: Target GitHub repository or organization URL.
-- `-t, --token <token>`: Optional GitHub Actions registration token. Prefer the hidden prompt to avoid shell history and process-list exposure.
+- `-t, --token <token>`: Optional GitHub Actions registration token. Prefer the hidden prompt to avoid shell history and process-list exposure. Native setup briefly passes the token to GitHub's configuration process in argv.
 - `-n, --name <name>`: Custom runner name (defaults to `<hostname>-linux-docker` or `<hostname>-dgrunner`).
 - `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,linux,x64,docker,ubuntu-24.04`).
 - `-d, --dir <path>`: Runner installation directory (defaults to `~/.dgrunner/actions-runner`).
@@ -412,6 +413,8 @@ dgrunner logs --follow
 # View last 100 lines and follow
 dgrunner logs -n 100 -f
 ```
+
+Native Linux logs are read from the systemd journal and may prompt for sudo access. Windows background logs include both stdout and stderr.
 
 ---
 

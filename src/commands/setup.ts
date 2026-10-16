@@ -290,6 +290,13 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       });
     }
 
+    const urlValidation = validateGitHubUrl(targetUrl);
+    if (!urlValidation.valid) {
+      logger.error(`Invalid URL: ${urlValidation.error}`);
+      process.exit(1);
+      return;
+    }
+
     if (!token) {
       console.log(pc.dim(`  Get your token from: ${targetUrl}/settings/actions/runners/new`));
       token = await password({
@@ -321,7 +328,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
         targetEnv === "docker"
           ? (dockerPreset ? dockerPreset.defaultLabels.join(",") : "self-hosted,linux,x64,docker,dgrunner")
           : targetEnv === "windows"
-          ? "self-hosted,dgrunner,windows,x64"
+          ? `self-hosted,dgrunner,windows,${process.arch}`
           : (runningInWsl
               ? `self-hosted,dgrunner,linux,wsl,${hostDistro?.id || "ubuntu"},${process.arch}`
               : `self-hosted,dgrunner,linux,${hostDistro?.id || "linux"},${process.arch}`);
@@ -360,7 +367,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
         targetEnv === "docker"
           ? (dockerPreset ? [...dockerPreset.defaultLabels] : ["self-hosted", "linux", "x64", "docker", "dgrunner"])
           : targetEnv === "windows"
-          ? ["self-hosted", "dgrunner", "windows", "x64"]
+          ? ["self-hosted", "dgrunner", "windows", process.arch]
           : (runningInWsl
               ? ["self-hosted", "dgrunner", "linux", "wsl", hostDistro?.id || "ubuntu", process.arch]
               : ["self-hosted", "dgrunner", "linux", hostDistro?.id || "linux", process.arch]);
@@ -543,7 +550,7 @@ export function registerSetupCommand(program: Command): void {
     .command("setup")
     .description("Set up, configure, and start the self-hosted GitHub Actions runner")
     .option("-u, --url <url>", "GitHub repository or organization URL")
-    .option("-t, --token <token>", "GitHub runner registration token")
+    .option("-t, --token <token>", "GitHub runner registration token (may be exposed in shell history and process listings)")
     .option("-n, --name <name>", "Runner name")
     .option("-l, --labels <labels>", "Comma-separated custom runner labels")
     .option("-d, --dir <path>", "Runner installation directory", DEFAULT_RUNNER_DIR)
@@ -553,7 +560,7 @@ export function registerSetupCommand(program: Command): void {
     .option("--image <image>", "Custom Docker runner container image")
     .option("--docker-socket", "Mount the host Docker socket into the runner (grants workflows host-level Docker control)", false)
     .option("--force", "Ignore critical pre-flight check failures and proceed", false)
-    .option("--no-service", "Do not install or start persistent background service", false)
+    .option("--no-service", "Do not install or start persistent background service")
     .action(async (options) => {
       await runSetupFlow(options);
     });

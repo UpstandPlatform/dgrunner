@@ -115,18 +115,20 @@ export function registerServiceCommands(program: Command): void {
       console.log();
     });
 
-  // dgrunner logs [--follow] [--lines <n>]
+  // dgrunner logs [--follow] [--lines <n>] [--dir <path>]
   program
     .command("logs")
     .alias("attach")
     .description("View or follow real-time logs of the background runner")
     .option("-f, --follow", "Follow live log output continuously", false)
     .option("-n, --lines <count>", "Number of initial lines to display", "50")
+    .option("-d, --dir <path>", "Runner installation directory", DEFAULT_RUNNER_DIR)
     .action(async (options) => {
       logger.header("dgrunner Background Service Logs");
       await tailRunnerLogs({
         follow: options.follow,
         lines: parseInt(options.lines, 10) || 50,
+        runnerDir: options.dir,
       });
     });
 }

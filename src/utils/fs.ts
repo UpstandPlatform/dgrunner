@@ -59,7 +59,7 @@ export async function extractArchive(archivePath: string, destDir: string): Prom
           [
             "-NoProfile",
             "-Command",
-            "Expand-Archive -LiteralPath $env:DGRUNNER_ARCHIVE_PATH -DestinationPath $env:DGRUNNER_DESTINATION_PATH -Force",
+            "try { Expand-Archive -LiteralPath $env:DGRUNNER_ARCHIVE_PATH -DestinationPath $env:DGRUNNER_DESTINATION_PATH -Force -ErrorAction Stop } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
           ],
           {
             env: {
@@ -89,7 +89,12 @@ export async function extractArchive(archivePath: string, destDir: string): Prom
  */
 export async function getFreeDiskBytes(checkPath: string): Promise<number | null> {
   try {
-    const target = fs.existsSync(checkPath) ? checkPath : path.dirname(checkPath);
+    let target = path.resolve(checkPath);
+    while (!fs.existsSync(target)) {
+      const parent = path.dirname(target);
+      if (parent === target) return null;
+      target = parent;
+    }
     if (typeof fsPromises.statfs === "function") {
       const stats = await fsPromises.statfs(target);
       return stats.bavail * stats.bsize;

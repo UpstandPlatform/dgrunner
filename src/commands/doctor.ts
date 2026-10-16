@@ -1,4 +1,4 @@
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import pc from "picocolors";
 import { runDoctorChecks } from "../core/doctor.js";
 import { logger } from "../utils/logger.js";
@@ -9,11 +9,12 @@ export function registerDoctorCommand(program: Command): void {
     .command("doctor")
     .description("Run pre-flight security, dependency, and environment checks")
     .option("-d, --dir <path>", "Runner base directory to check", DEFAULT_BASE_DIR)
+    .addOption(new Option("--env <environment>", "Target runner environment").choices(["windows", "docker", "wsl", "native"]))
     .option("--strict", "Fail with exit code 1 if any warnings or errors are found", false)
     .action(async (options) => {
       logger.header("dgrunner Pre-Flight & Security Doctor");
 
-      const report = await runDoctorChecks(options.dir);
+      const report = await runDoctorChecks({ targetDir: options.dir, targetEnv: options.env });
 
       for (const check of report.checks) {
         if (check.status === "pass") {

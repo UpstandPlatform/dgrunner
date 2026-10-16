@@ -33,7 +33,7 @@ Resolve `doctor` failures before setup. `--force` bypasses critical safety check
 ## Register the runner
 
 1. Ask the operator to create a short-lived runner registration token in the target private GitHub repository or organization settings. Do not request a personal access token.
-2. Prefer the interactive `dgrunner setup` wizard. It prompts for the registration token using hidden input. Although setup supports `--token`, do not put tokens in shell commands, scripts, logs, or workflow files because command-line arguments can be exposed in process listings and shell history.
+2. Prefer the interactive `dgrunner setup` wizard. It prompts for the registration token using hidden input. Do not put tokens in shell commands, scripts, logs, or workflow files because shell history and process listings can expose them. Native runner configuration briefly passes the token to GitHub's configuration process as an argument; Docker configuration sends it over stdin.
 3. Choose the mode explicitly when it prevents ambiguity:
 
 ~~~bash

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { calculateSha256, ensureDir, getFreeDiskBytes } from "../src/utils/fs.js";
+import { calculateSha256, ensureDir, extractArchive, getFreeDiskBytes } from "../src/utils/fs.js";
 
 describe("FS Utilities", () => {
   let tmpDir: string;
@@ -30,5 +30,18 @@ describe("FS Utilities", () => {
     const freeBytes = await getFreeDiskBytes(tmpDir);
     expect(freeBytes).not.toBeNull();
     expect(freeBytes).toBeGreaterThan(0);
+  });
+
+  it("checks disk space using the nearest existing parent of a missing nested path", async () => {
+    const missingPath = path.join(tmpDir, "missing", "nested", "runner");
+    const freeBytes = await getFreeDiskBytes(missingPath);
+    expect(freeBytes).not.toBeNull();
+    expect(freeBytes).toBeGreaterThan(0);
+  });
+
+  it("rejects a malformed ZIP instead of reporting extraction success", async () => {
+    const archivePath = path.join(tmpDir, "broken.zip");
+    await fsPromises.writeFile(archivePath, "not a zip archive");
+    await expect(extractArchive(archivePath, path.join(tmpDir, "extracted"))).rejects.toThrow(/Failed to extract zip archive/);
   });
 });

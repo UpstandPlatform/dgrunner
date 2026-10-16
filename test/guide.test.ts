@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { generateVerificationWorkflowYaml } from "../src/core/guide.js";
+import fsPromises from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { generateVerificationWorkflowYaml, writeVerificationWorkflow } from "../src/core/guide.js";
 
 describe("Guide & Workflow Generator", () => {
   it("should generate valid workflow YAML with default self-hosted labels", () => {
@@ -20,5 +23,20 @@ describe("Guide & Workflow Generator", () => {
   it("should include Docker verification container steps", () => {
     const yaml = generateVerificationWorkflowYaml();
     expect(yaml).toContain("docker run --rm alpine:latest");
+  });
+
+  it("preserves permissions on an existing workflows directory", async () => {
+    if (process.platform === "win32") return;
+    const projectRoot = await fsPromises.mkdtemp(path.join(os.tmpdir(), "dgrunner-guide-"));
+    const workflowsDir = path.join(projectRoot, ".github", "workflows");
+    try {
+      await fsPromises.mkdir(workflowsDir, { recursive: true });
+      await fsPromises.chmod(workflowsDir, 0o755);
+      await writeVerificationWorkflow(projectRoot);
+      const mode = (await fsPromises.stat(workflowsDir)).mode & 0o777;
+      expect(mode).toBe(0o755);
+    } finally {
+      await fsPromises.rm(projectRoot, { recursive: true, force: true });
+    }
   });
 });

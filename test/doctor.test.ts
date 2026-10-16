@@ -1,7 +1,16 @@
 import { describe, it, expect } from "vitest";
+import { Command } from "commander";
+import { registerDoctorCommand } from "../src/commands/doctor.js";
 import { runDoctorChecks } from "../src/core/doctor.js";
 
 describe("Doctor Module", () => {
+  it("exposes environment-specific checks through the CLI", () => {
+    const program = new Command();
+    registerDoctorCommand(program);
+    const doctor = program.commands.find((command) => command.name() === "doctor");
+    expect(doctor?.options.some((option) => option.long === "--env")).toBe(true);
+  });
+
   it("should run all pre-flight checks and return structured report", async () => {
     const report = await runDoctorChecks();
     expect(report).toBeDefined();

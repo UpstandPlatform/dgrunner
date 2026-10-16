@@ -1,5 +1,5 @@
-import path from "node:path";
-import { spawn, type SpawnOptions } from "node:child_process";
+import type { SpawnOptions } from "node:child_process";
+import spawn from "cross-spawn";
 
 export interface ExecResult {
   exitCode: number;
@@ -10,33 +10,6 @@ export interface ExecResult {
 export interface ExecOptions extends SpawnOptions {
   timeoutMs?: number;
   input?: string;
-  hideError?: boolean;
-}
-
-const WINDOWS_CMD_WRAPPERS = new Set(["npm", "npx", "pnpm", "yarn", "bun", "corepack"]);
-
-export function resolveExecutable(cmd: string, args: string[]): { actualCmd: string; actualArgs: string[] } {
-  if (process.platform !== "win32") {
-    return { actualCmd: cmd, actualArgs: args };
-  }
-
-  const base = path.basename(cmd).toLowerCase();
-  const baseWithoutExt = path.basename(cmd, path.extname(cmd)).toLowerCase();
-
-  const isBatchOrCmd =
-    base.endsWith(".cmd") ||
-    base.endsWith(".bat") ||
-    WINDOWS_CMD_WRAPPERS.has(base) ||
-    WINDOWS_CMD_WRAPPERS.has(baseWithoutExt);
-
-  if (isBatchOrCmd) {
-    return {
-      actualCmd: process.env.COMSPEC || "cmd.exe",
-      actualArgs: ["/d", "/c", cmd, ...args],
-    };
-  }
-
-  return { actualCmd: cmd, actualArgs: args };
 }
 
 export function execCommand(
@@ -45,13 +18,11 @@ export function execCommand(
   options: ExecOptions = {}
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
-    const { timeoutMs, input, hideError, ...spawnOpts } = options;
-
-    const { actualCmd, actualArgs } = resolveExecutable(cmd, args);
+    const { timeoutMs, input, ...spawnOpts } = options;
 
     let child;
     try {
-      child = spawn(actualCmd, actualArgs, {
+      child = spawn(cmd, args, {
         windowsHide: true,
         shell: false,
         ...spawnOpts,
@@ -67,11 +38,16 @@ export function execCommand(
     let stdout = "";
     let stderr = "";
     let timer: NodeJS.Timeout | undefined;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    let timedOut = false;
 
     if (timeoutMs) {
       timer = setTimeout(() => {
+        timedOut = true;
         child.kill("SIGTERM");
         stderr += `\nCommand timed out after ${timeoutMs}ms`;
+        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+        forceKillTimer.unref();
       }, timeoutMs);
     }
 
@@ -87,13 +63,14 @@ export function execCommand(
       });
     }
 
-    if (input && child.stdin) {
-      child.stdin.write(input);
+    if (child.stdin) {
+      if (input !== undefined) child.stdin.write(input);
       child.stdin.end();
     }
 
     child.on("error", (err) => {
       if (timer) clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({
         exitCode: 1,
         stdout,
@@ -101,12 +78,13 @@ export function execCommand(
       });
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (timer) clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({
-        exitCode: code ?? 0,
+        exitCode: timedOut ? 1 : code ?? (signal ? 1 : 0),
         stdout: stdout.trim(),
-        stderr: stderr.trim(),
+        stderr: `${stderr}${timedOut && !stderr.includes("Command timed out") ? `\nCommand timed out after ${timeoutMs}ms` : ""}`.trim(),
       });
     });
   });
@@ -118,9 +96,7 @@ export function execInteractive(
   options: SpawnOptions = {}
 ): Promise<number> {
   return new Promise((resolve, reject) => {
-    const { actualCmd, actualArgs } = resolveExecutable(cmd, args);
-
-    const child = spawn(actualCmd, actualArgs, {
+    const child = spawn(cmd, args, {
       stdio: "inherit",
       shell: false,
       windowsHide: false,
