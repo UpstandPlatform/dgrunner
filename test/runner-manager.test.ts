@@ -404,7 +404,7 @@ describe("Foreground runner and live log handling", () => {
       });
 
     try {
-      const processes = await listRunnerProcesses();
+      const processes = await listRunnerProcesses(runnerDir);
       expect(processes).toHaveLength(1);
       expect(processes[0]?.name).toBe("Runner.Listener");
     } finally {
