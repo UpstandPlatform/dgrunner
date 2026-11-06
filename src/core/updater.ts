@@ -20,6 +20,18 @@ export interface UpgradeResult {
   error?: string;
 }
 
+export function isValidNpmDistTag(tag: string): boolean {
+  return tag.length > 0 && tag.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(tag);
+}
+
+function isValidVersion(version: unknown): version is string {
+  if (typeof version !== "string" || version.length > 256) return false;
+  const match = version.match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/);
+  return Boolean(match && !match[4]?.split(".").some((identifier) =>
+    /^\d+$/.test(identifier) && identifier.length > 1 && identifier.startsWith("0")
+  ));
+}
+
 /**
  * Compares two semver strings (e.g. "1.0.0" vs "1.0.1").
  * Returns:
@@ -29,10 +41,13 @@ export interface UpgradeResult {
  */
 export function compareSemver(v1: string, v2: string): number {
   const parse = (version: string) => {
+    if (version.length > 256) return null;
     const match = version.trim().match(
       /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
     );
-    if (!match) return null;
+    if (!match || match[4]?.split(".").some((identifier) =>
+      /^\d+$/.test(identifier) && identifier.length > 1 && identifier.startsWith("0")
+    )) return null;
     return {
       core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
       prerelease: match[4]?.split(".") ?? null,
@@ -73,6 +88,7 @@ export function compareSemver(v1: string, v2: string): number {
  * Fetches the latest released version of the package from the npm registry.
  */
 export async function fetchLatestVersion(tag = "latest"): Promise<string | null> {
+  if (!isValidNpmDistTag(tag)) return null;
   // 1. Try HTTP request directly to npm registry
   try {
     const url = `https://registry.npmjs.org/${NPM_PACKAGE_NAME}/${encodeURIComponent(tag)}`;
@@ -82,8 +98,11 @@ export async function fetchLatestVersion(tag = "latest"): Promise<string | null>
     });
 
     if (res.ok) {
-      const data: any = await res.json();
-      if (data?.version) return data.version;
+      const data: unknown = await res.json();
+      const version = data && typeof data === "object" && "version" in data
+        ? (data as { version?: unknown }).version
+        : undefined;
+      if (isValidVersion(version)) return version;
     }
   } catch {}
 
@@ -95,7 +114,7 @@ export async function fetchLatestVersion(tag = "latest"): Promise<string | null>
     if (res.exitCode === 0 && res.stdout.trim()) {
       const lines = res.stdout.trim().split(/\r?\n/).filter(Boolean);
       const v = lines[lines.length - 1].trim();
-      if (v && /^\d+\.\d+\.\d+/.test(v)) {
+      if (isValidVersion(v)) {
         return v;
       }
     }
@@ -139,6 +158,7 @@ export function getUpgradeCommand(
   pm: PackageManager,
   tag = "latest"
 ): { command: string; args: string[]; display: string } {
+  if (!isValidNpmDistTag(tag)) throw new Error("Invalid npm distribution tag.");
   const pkg = `${NPM_PACKAGE_NAME}@${tag}`;
   let command = "npm";
   let args: string[] = [];
@@ -198,6 +218,11 @@ export async function checkForUpdates(tag = "latest"): Promise<{
 export async function runUpgrade(options: UpgradeOptions = {}): Promise<UpgradeResult> {
   const currentVersion = APP_VERSION;
   const tag = options.tag || "latest";
+  if (!isValidNpmDistTag(tag)) {
+    const error = "Invalid npm distribution tag. Use letters, numbers, dots, underscores, or hyphens.";
+    logger.error(error);
+    return { currentVersion, latestVersion: "unknown", updateAvailable: false, upgraded: false, error };
+  }
 
   logger.info(`Checking npm registry for ${pc.bold(NPM_PACKAGE_NAME)} updates...`);
 

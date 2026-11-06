@@ -1,5 +1,5 @@
-import fs from "node:fs";
 import fsPromises from "node:fs/promises";
+import crypto from "node:crypto";
 import path from "node:path";
 import pc from "picocolors";
 import { logger } from "../utils/logger.js";
@@ -77,6 +77,9 @@ export function generateVerificationWorkflowYaml(options: WorkflowOptions = {}):
 
   return `name: Verify dgrunner Self-Hosted Runner
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   push:
@@ -88,7 +91,7 @@ jobs:
     runs-on: ${runsOnStr}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
       - name: Print Runner & OS Details
         shell: bash
@@ -147,14 +150,43 @@ jobs:
  */
 export async function writeVerificationWorkflow(
   projectRoot = process.cwd(),
-  options: WorkflowOptions = {}
+  options: WorkflowOptions = {},
+  overwrite = false
 ): Promise<string> {
-  const workflowsDir = path.join(projectRoot, ".github", "workflows");
+  const projectRealPath = await fsPromises.realpath(projectRoot);
+  const githubDir = path.join(projectRoot, ".github");
+  await fsPromises.mkdir(githubDir, { recursive: true });
+  const githubRealPath = await fsPromises.realpath(githubDir);
+  const relativeGithubPath = path.relative(projectRealPath, githubRealPath);
+  if (relativeGithubPath === ".." || relativeGithubPath.startsWith(`..${path.sep}`) || path.isAbsolute(relativeGithubPath)) {
+    throw new Error("The .github directory resolves outside the project root.");
+  }
+
+  const workflowsDir = path.join(githubDir, "workflows");
   await fsPromises.mkdir(workflowsDir, { recursive: true });
+  const workflowsRealPath = await fsPromises.realpath(workflowsDir);
+  const relativeWorkflowsPath = path.relative(projectRealPath, workflowsRealPath);
+  if (relativeWorkflowsPath === ".." || relativeWorkflowsPath.startsWith(`..${path.sep}`) || path.isAbsolute(relativeWorkflowsPath)) {
+    throw new Error("The workflows directory resolves outside the project root.");
+  }
 
   const workflowPath = path.join(workflowsDir, "verify-runner.yml");
   const yamlContent = generateVerificationWorkflowYaml(options);
-
-  await fsPromises.writeFile(workflowPath, yamlContent, "utf-8");
+  if (overwrite) {
+    const currentFile = await fsPromises.lstat(workflowPath).catch(() => undefined);
+    if (currentFile && !currentFile.isFile()) {
+      throw new Error("Refusing to overwrite a non-regular verification workflow file.");
+    }
+    const temporaryPath = `${workflowPath}.${crypto.randomUUID()}.tmp`;
+    try {
+      await fsPromises.writeFile(temporaryPath, yamlContent, { encoding: "utf-8", flag: "wx" });
+      await fsPromises.rename(temporaryPath, workflowPath);
+    } catch (error) {
+      await fsPromises.unlink(temporaryPath).catch(() => {});
+      throw error;
+    }
+  } else {
+    await fsPromises.writeFile(workflowPath, yamlContent, { encoding: "utf-8", flag: "wx" });
+  }
   return workflowPath;
 }

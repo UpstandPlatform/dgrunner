@@ -4,7 +4,7 @@ import { getFreeDiskBytes } from "../utils/fs.js";
 import { DEFAULT_BASE_DIR, MINIMUM_FREE_DISK_BYTES } from "../config/constants.js";
 import { inspectDockerSecurity, isSuperUser } from "./security.js";
 import { resolveGitBashDir } from "./runner-manager.js";
-import { getInstalledWslDistroDetails } from "./wsl.js";
+import { getInstalledWslDistroDetails, isWsl } from "./wsl.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -24,21 +24,23 @@ export interface DoctorReport {
   checks: CheckResult[];
 }
 
-export function isWsl(): boolean {
-  if (process.platform !== "linux") return false;
-  try {
-    return (
-      os.release().toLowerCase().includes("microsoft") ||
-      os.release().toLowerCase().includes("wsl")
-    );
-  } catch {
-    return false;
-  }
-}
-
 export interface DoctorOptions {
   targetDir?: string;
   targetEnv?: "windows" | "docker" | "wsl" | "native";
+}
+
+export function isTargetEnvironmentCompatible(
+  targetEnv: DoctorOptions["targetEnv"],
+  hostPlatform: NodeJS.Platform,
+  insideWsl = false
+): boolean {
+  switch (targetEnv) {
+    case "windows": return hostPlatform === "win32";
+    case "docker": return true;
+    case "wsl": return hostPlatform === "win32" || (hostPlatform === "linux" && insideWsl);
+    case "native":
+    case undefined: return hostPlatform === "win32" || hostPlatform === "linux";
+  }
 }
 
 export async function runDoctorChecks(
@@ -60,10 +62,13 @@ export async function runDoctorChecks(
   const platform = process.platform;
   const arch = process.arch;
   const inWsl = isWsl();
-  const isSupportedPlatform =
-    isDockerMode ||
+  const wrongWindowsTarget = targetEnv === "windows" && platform !== "win32";
+  const environmentCompatible = isTargetEnvironmentCompatible(targetEnv, platform, inWsl);
+  const isSupportedPlatform = environmentCompatible && (
+    (isDockerMode && (arch === "x64" || arch === "arm64")) ||
     (platform === "linux" && (arch === "x64" || arch === "arm64")) ||
-    (platform === "win32" && (arch === "x64" || arch === "arm64"));
+    (platform === "win32" && (arch === "x64" || arch === "arm64"))
+  );
 
   if (isSupportedPlatform) {
     checks.push({
@@ -79,7 +84,9 @@ export async function runDoctorChecks(
       id: "platform",
       name: "Operating System & Architecture",
       status: "fail",
-      message: `Unsupported platform or architecture: ${platform} (${arch})`,
+      message: wrongWindowsTarget
+        ? `Windows native runner requested from a ${platform} host.`
+        : `Unsupported platform or architecture: ${platform} (${arch})`,
       detail: "Official GitHub Actions runner binaries support Linux and Windows on the x64 and ARM64 architectures.",
     });
   }
@@ -121,6 +128,29 @@ export async function runDoctorChecks(
         message: `Running as standard user (${os.userInfo().username})`,
       });
     }
+  }
+
+  const isWslRunner = targetEnv === "wsl" || (targetEnv === undefined && inWsl);
+  const isWindowsRunner = targetEnv === "windows" ||
+    (targetEnv === undefined && platform === "win32");
+  const isNativeRunner = targetEnv === "native" ||
+    (targetEnv === undefined && platform !== "win32" && !inWsl);
+  if (!isDockerMode && (isWindowsRunner || isWslRunner || isNativeRunner)) {
+    const detail = isWslRunner
+      ? "Workflow jobs run as the selected WSL Linux user. Default WSL automounts can expose Windows drives under /mnt, and interoperability can launch Windows executables. This is not per-job isolation."
+      : "Workflow jobs run with the runner account's filesystem and process permissions. dgrunner does not currently isolate native jobs in a disposable sandbox.";
+    checks.push({
+      id: "runner-isolation",
+      name: "Workflow Job Isolation",
+      status: "warn",
+      message: isWslRunner
+        ? "WSL runner jobs are not isolated from the WSL distribution or its configured Windows integrations."
+        : isWindowsRunner
+          ? "Windows native runner jobs are not isolated from this Windows account."
+          : "Native runner jobs are not isolated from this host account.",
+      detail,
+      remediation: "Use only trusted repositories on persistent self-hosted runners. For untrusted workflow code, use a dedicated disposable VM for each job.",
+    });
   }
 
   // 3. Git Check
@@ -168,12 +198,17 @@ export async function runDoctorChecks(
 
   if (targetEnv === "wsl") {
     if (platform !== "win32") {
-      checks.push({
+      checks.push(inWsl ? {
+        id: "wsl-cli",
+        name: "Windows Subsystem for Linux",
+        status: "pass",
+        message: "Already running inside a WSL Linux distribution.",
+      } : {
         id: "wsl-cli",
         name: "Windows Subsystem for Linux",
         status: "fail",
-        message: "WSL runner checks must be run from a Windows host.",
-        remediation: "Run 'dgrunner doctor --env wsl' from Windows PowerShell or Command Prompt.",
+        message: "WSL runner checks must run from Windows or inside a WSL distribution.",
+        remediation: "Run 'dgrunner doctor --env wsl' from Windows PowerShell or from the target WSL distribution.",
       });
     } else {
       const wslCommand = await execCommand("where.exe", ["wsl.exe"]);
@@ -272,17 +307,6 @@ export async function runDoctorChecks(
       });
     }
 
-    if (dockerSec.insecureTcpSocket) {
-      checks.push({
-        id: "docker-socket",
-        name: "Docker Socket Security",
-        status: "fail",
-        message: "Docker is configured to expose an unauthenticated remote TCP socket!",
-        detail: "Anyone with network access can execute arbitrary containers on your machine.",
-        remediation: "Unset DOCKER_HOST or bind Docker daemon only to local pipes/sockets or TLS.",
-      });
-    }
-
     if (platform === "linux") {
       if (dockerSec.isRootless) {
         checks.push({
@@ -297,8 +321,8 @@ export async function runDoctorChecks(
           name: "Docker in WSL Environment",
           status: "warn",
           message: "Docker daemon in WSL is running in standard host mode.",
-          detail: "WSL2 provides hypervisor isolation from the host Windows OS.",
-          remediation: "Rootless Docker can be configured, or you can use dgrunner's Docker Container mode from Windows.",
+          detail: "WSL2 runs in a lightweight VM, but default Windows-drive mounts and interoperability can expose Windows resources to WSL processes. This does not provide per-job isolation.",
+          remediation: "Configure WSL automount and interoperability restrictions as defense in depth, or use a dedicated disposable VM for untrusted workflow code.",
         });
       } else {
         checks.push({
@@ -313,6 +337,17 @@ export async function runDoctorChecks(
         });
       }
     }
+  }
+
+  if (dockerSec.insecureTcpSocket) {
+    checks.push({
+      id: "docker-socket",
+      name: "Docker Socket Security",
+      status: "fail",
+      message: "Docker is configured to expose an unauthenticated remote TCP socket!",
+      detail: "Anyone with network access can execute arbitrary containers on your machine.",
+      remediation: "Unset DOCKER_HOST or bind Docker daemon only to local pipes/sockets or TLS.",
+    });
   }
 
   // 5. GitHub Network Connectivity

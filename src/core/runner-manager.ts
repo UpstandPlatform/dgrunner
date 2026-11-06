@@ -8,6 +8,24 @@ import { StringDecoder } from "node:string_decoder";
 import spawn from "cross-spawn";
 import { DEFAULT_BASE_DIR, DEFAULT_RUNNER_DIR } from "../config/constants.js";
 import { execCommand, execInteractive } from "../utils/exec.js";
+import { ensureDir } from "../utils/fs.js";
+import { redactSecret } from "../utils/logger.js";
+import {
+  normalizeRunnerLabels,
+  validateGitHubUrl,
+  validateRegistrationToken,
+  validateRunnerLabels,
+  validateRunnerName,
+} from "./security.js";
+import {
+  getValidatedLinuxServiceUnit,
+  getLinuxRunnerServiceStatus,
+  installLinuxRunnerService,
+  readLinuxServiceUnit,
+  startLinuxRunnerService,
+  stopLinuxRunnerService,
+  uninstallLinuxRunnerService,
+} from "./linux-service.js";
 import {
   DEFAULT_CONTAINER_NAME,
   DGRUNNER_MANAGED_LABEL,
@@ -62,7 +80,12 @@ function runnerMetadataIdentity(metadata: RunnerMetadata): string {
     const containerName = metadata.containerName || metadata.runnerDir.replace(/^docker:/, "");
     return `docker:${containerName}`;
   }
-  return `native:${path.resolve(metadata.runnerDir).toLowerCase()}`;
+  return "native:" + normalizeRunnerPath(metadata.runnerDir);
+}
+
+function normalizeRunnerPath(runnerDir: string): string {
+  const resolved = path.resolve(runnerDir);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function getRunnerMetadataFile(metadata: RunnerMetadata, baseDir = DEFAULT_BASE_DIR): string {
@@ -71,7 +94,7 @@ function getRunnerMetadataFile(metadata: RunnerMetadata, baseDir = DEFAULT_BASE_
 }
 
 function getRunnerPidFile(runnerDir: string): string {
-  const runnerKey = crypto.createHash("sha256").update(path.resolve(runnerDir).toLowerCase()).digest("hex").slice(0, 16);
+  const runnerKey = crypto.createHash("sha256").update(normalizeRunnerPath(runnerDir)).digest("hex").slice(0, 16);
   return path.join(DEFAULT_BASE_DIR, `runner-${runnerKey}.pid`);
 }
 
@@ -82,6 +105,21 @@ export function isRunnerInstalled(runnerDir = DEFAULT_RUNNER_DIR): boolean {
 
 export function isRunnerConfigured(runnerDir = DEFAULT_RUNNER_DIR): boolean {
   return fs.existsSync(path.join(runnerDir, ".runner"));
+}
+
+function getRunnerStartError(runnerDir: string): string | undefined {
+  const configScript = process.platform === "win32" ? "config.cmd" : "config.sh";
+  const startScript = process.platform === "win32" ? "run.cmd" : "run.sh";
+  if (!fs.existsSync(path.join(runnerDir, configScript))) {
+    return `Runner is not installed at '${runnerDir}'. Run 'dgrunner setup' first.`;
+  }
+  if (!isRunnerConfigured(runnerDir)) {
+    return `Runner is installed but not configured at '${runnerDir}'. Run 'dgrunner setup' first.`;
+  }
+  if (!fs.existsSync(path.join(runnerDir, startScript))) {
+    return `Runner start script '${startScript}' is missing from '${runnerDir}'. Re-run 'dgrunner setup'.`;
+  }
+  return undefined;
 }
 
 export async function readOfficialRunnerConfig(runnerDir = DEFAULT_RUNNER_DIR): Promise<any | null> {
@@ -112,13 +150,29 @@ export async function readLocalMetadata(baseDir = DEFAULT_BASE_DIR): Promise<Run
 function isRunnerMetadata(value: unknown): value is RunnerMetadata {
   if (!value || typeof value !== "object") return false;
   const metadata = value as Partial<RunnerMetadata>;
-  return typeof metadata.runnerDir === "string" &&
-    typeof metadata.name === "string" &&
-    typeof metadata.url === "string" &&
-    Array.isArray(metadata.labels) &&
-    metadata.labels.every((label) => typeof label === "string") &&
-    (metadata.mode === undefined || metadata.mode === "native" || metadata.mode === "docker" || metadata.mode === "wsl") &&
-    (metadata.containerName === undefined || typeof metadata.containerName === "string");
+  if (
+    typeof metadata.runnerDir !== "string" ||
+    typeof metadata.name !== "string" ||
+    !validateRunnerName(metadata.name).valid ||
+    typeof metadata.url !== "string" ||
+    !Array.isArray(metadata.labels) ||
+    !metadata.labels.every((label) => typeof label === "string") ||
+    !validateRunnerLabels(metadata.labels).valid ||
+    typeof metadata.configuredAt !== "string" ||
+    !Number.isFinite(Date.parse(metadata.configuredAt)) ||
+    typeof metadata.os !== "string" ||
+    typeof metadata.arch !== "string" ||
+    (metadata.scope !== "repo" && metadata.scope !== "org") ||
+    (metadata.mode !== undefined && metadata.mode !== "native" && metadata.mode !== "docker" && metadata.mode !== "wsl") ||
+    (metadata.containerName !== undefined &&
+      (typeof metadata.containerName !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(metadata.containerName)))
+  ) return false;
+
+  if (metadata.mode === "docker") {
+    const containerName = metadata.containerName || metadata.runnerDir.replace(/^docker:/, "");
+    return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(containerName);
+  }
+  return true;
 }
 
 export async function listLocalRunnerMetadata(baseDir = DEFAULT_BASE_DIR): Promise<RunnerMetadata[]> {
@@ -147,12 +201,29 @@ export function metadataMatchesRunner(metadata: RunnerMetadata | null, runnerDir
   if (metadata.mode === "docker") {
     const containerName = metadata.containerName || metadata.runnerDir.replace(/^docker:/, "");
     if (runnerDir.startsWith("docker:")) return containerName === runnerDir.slice("docker:".length);
-    return path.resolve(runnerDir).toLowerCase() === path.resolve(DEFAULT_RUNNER_DIR).toLowerCase() &&
+    return normalizeRunnerPath(runnerDir) === normalizeRunnerPath(DEFAULT_RUNNER_DIR) &&
       containerName === DEFAULT_CONTAINER_NAME;
   }
 
   const metadataRunnerDir = metadata.runnerDir || DEFAULT_RUNNER_DIR;
-  return path.resolve(metadataRunnerDir).toLowerCase() === path.resolve(runnerDir).toLowerCase();
+  return normalizeRunnerPath(metadataRunnerDir) === normalizeRunnerPath(runnerDir);
+}
+
+async function writeJsonAtomically(filePath: string, value: unknown): Promise<void> {
+  await ensureDir(path.dirname(filePath));
+  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fsPromises.writeFile(temporaryPath, JSON.stringify(value, null, 2), {
+      flag: "wx",
+      mode: 0o600,
+      encoding: "utf-8",
+    });
+    await fsPromises.rename(temporaryPath, filePath);
+    if (process.platform !== "win32") await fsPromises.chmod(filePath, 0o600);
+  } catch (error) {
+    await fsPromises.unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
 }
 
 export async function readMetadataForRunner(
@@ -161,7 +232,7 @@ export async function readMetadataForRunner(
 ): Promise<RunnerMetadata | null> {
   const metadata = await listLocalRunnerMetadata(baseDir);
   const matches = metadata.filter((entry) => metadataMatchesRunner(entry, runnerDir));
-  if (matches.length > 1 && path.resolve(runnerDir).toLowerCase() === path.resolve(DEFAULT_RUNNER_DIR).toLowerCase()) {
+  if (matches.length > 1 && normalizeRunnerPath(runnerDir) === normalizeRunnerPath(DEFAULT_RUNNER_DIR)) {
     const nativeMetadata = matches.find((entry) => entry.mode !== "docker");
     const dockerMetadata = matches.find((entry) => entry.mode === "docker");
     return isRunnerConfigured(runnerDir) ? nativeMetadata || dockerMetadata || null : dockerMetadata || nativeMetadata || null;
@@ -172,32 +243,26 @@ export async function readMetadataForRunner(
 export async function saveLocalMetadata(meta: RunnerMetadata, baseDir = DEFAULT_BASE_DIR): Promise<void> {
   const previousMetadata = await readLocalMetadata(baseDir);
   if (previousMetadata && isRunnerMetadata(previousMetadata) && runnerMetadataIdentity(previousMetadata) !== runnerMetadataIdentity(meta)) {
-    await fsPromises.mkdir(getRunnerRegistryDir(baseDir), { recursive: true, mode: 0o700 });
-    await fsPromises.writeFile(getRunnerMetadataFile(previousMetadata, baseDir), JSON.stringify(previousMetadata, null, 2), {
-      mode: 0o600,
-      encoding: "utf-8",
-    });
+    await writeJsonAtomically(getRunnerMetadataFile(previousMetadata, baseDir), previousMetadata);
   }
 
-  await fsPromises.mkdir(getRunnerRegistryDir(baseDir), { recursive: true, mode: 0o700 });
-  await fsPromises.writeFile(getRunnerMetadataFile(meta, baseDir), JSON.stringify(meta, null, 2), {
-    mode: 0o600,
-    encoding: "utf-8",
-  });
-
-  const metaFile = getRunnerConfigFile(baseDir);
-  await fsPromises.mkdir(path.dirname(metaFile), { recursive: true, mode: 0o700 });
-  await fsPromises.writeFile(metaFile, JSON.stringify(meta, null, 2), {
-    mode: 0o600,
-    encoding: "utf-8",
-  });
+  await writeJsonAtomically(getRunnerMetadataFile(meta, baseDir), meta);
+  await writeJsonAtomically(getRunnerConfigFile(baseDir), meta);
 }
 
 export async function removeLocalMetadata(meta: RunnerMetadata, baseDir = DEFAULT_BASE_DIR): Promise<void> {
-  await fsPromises.unlink(getRunnerMetadataFile(meta, baseDir)).catch(() => {});
+  const unlinkIfPresent = async (filePath: string) => {
+    try {
+      await fsPromises.unlink(filePath);
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  };
+
+  await unlinkIfPresent(getRunnerMetadataFile(meta, baseDir));
   const legacyMetadata = await readLocalMetadata(baseDir);
   if (legacyMetadata && isRunnerMetadata(legacyMetadata) && runnerMetadataIdentity(legacyMetadata) === runnerMetadataIdentity(meta)) {
-    await fsPromises.unlink(getRunnerConfigFile(baseDir)).catch(() => {});
+    await unlinkIfPresent(getRunnerConfigFile(baseDir));
   }
 }
 
@@ -212,7 +277,7 @@ export async function resolveRunnerDirectory(
   const matches = (await listLocalRunnerMetadata(baseDir)).filter((metadata) =>
     metadata.name.toLowerCase() === normalizedSelector ||
     metadata.containerName?.toLowerCase() === normalizedSelector ||
-    metadata.runnerDir.toLowerCase() === normalizedSelector
+    normalizeRunnerPath(metadata.runnerDir) === normalizeRunnerPath(selector)
   );
   const uniqueMatches = [...new Map(matches.map((metadata) => [runnerMetadataIdentity(metadata), metadata])).values()];
 
@@ -300,18 +365,27 @@ export interface ConfigureRunnerOptions {
 
 export async function configureRunner(options: ConfigureRunnerOptions): Promise<{ success: boolean; output: string }> {
   const runnerDir = options.runnerDir || DEFAULT_RUNNER_DIR;
-  const runnerName = options.name || `${os.hostname()}-dgrunner`;
+  const runnerName = (options.name || `${os.hostname()}-dgrunner`).trim();
   const workDir = options.workDir || "_work";
-  const labelsStr = (options.labels && options.labels.length > 0)
-    ? options.labels.join(",")
-    : `self-hosted,dgrunner,${process.platform === "win32" ? "windows" : "linux"},${process.arch}`;
+  const url = options.url.trim();
+  const urlValidation = validateGitHubUrl(url);
+  if (!urlValidation.valid) return { success: false, output: urlValidation.error || "Invalid GitHub URL." };
+  const tokenValidation = validateRegistrationToken(options.token);
+  if (!tokenValidation.valid) return { success: false, output: tokenValidation.error || "Invalid runner token." };
+  const nameValidation = validateRunnerName(runnerName);
+  if (!nameValidation.valid) return { success: false, output: nameValidation.error || "Invalid runner name." };
+  const labels = options.labels && options.labels.length > 0
+    ? normalizeRunnerLabels(options.labels)
+    : ["self-hosted", "dgrunner", process.platform === "win32" ? "windows" : "linux", process.arch];
+  const labelsValidation = validateRunnerLabels(labels);
+  if (!labelsValidation.valid) return { success: false, output: labelsValidation.error || "Invalid runner labels." };
+  const labelsStr = labels.join(",");
 
   await ensureRunnerEnvironment(runnerDir);
 
   const args: string[] = [
     "--unattended",
-    "--url", options.url,
-    "--token", options.token,
+    "--url", url,
     "--name", runnerName,
     "--labels", labelsStr,
     "--work", workDir,
@@ -327,29 +401,40 @@ export async function configureRunner(options: ConfigureRunnerOptions): Promise<
   const result = await execCommand(cmd, args, {
     cwd: runnerDir,
     timeoutMs: 45000,
+    env: { ...process.env, ACTIONS_RUNNER_INPUT_TOKEN: options.token },
   });
 
   const success = result.exitCode === 0;
 
   if (success) {
-    const scope = options.url.split("/").filter(Boolean).length === 4 ? "repo" : "org";
-    await saveLocalMetadata({
-      runnerDir,
-      url: options.url,
-      name: runnerName,
-      labels: labelsStr.split(","),
-      scope,
-      configuredAt: new Date().toISOString(),
-      os: process.platform,
-      arch: process.arch,
-      mode: options.mode || (process.platform === "win32" ? "native" : "native"),
-      distro: options.distro,
-    });
+    const scope = url.split("/").filter(Boolean).length === 4 ? "repo" : "org";
+    try {
+      await saveLocalMetadata({
+        runnerDir,
+        url,
+        name: runnerName,
+        labels,
+        scope,
+        configuredAt: new Date().toISOString(),
+        os: process.platform,
+        arch: process.arch,
+        mode: options.mode || "native",
+        distro: options.distro,
+      });
+    } catch (error) {
+      return {
+        success: false,
+        output: redactSecret(
+          `Runner registered with GitHub, but local metadata could not be saved: ${error instanceof Error ? error.message : String(error)}`,
+          options.token
+        ),
+      };
+    }
   }
 
   return {
     success,
-    output: `${result.stdout}\n${result.stderr}`.trim(),
+    output: redactSecret(`${result.stdout}\n${result.stderr}`.trim(), options.token),
   };
 }
 
@@ -362,22 +447,8 @@ export async function installService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ 
       success: false,
       message: "Windows native mode is managed as a background process, not an installed Windows service.",
     };
-  } else {
-    // Linux svc.sh
-    const svcPath = path.join(runnerDir, "svc.sh");
-    if (fs.existsSync(svcPath)) {
-      const res = await execCommand("sudo", ["./svc.sh", "install", os.userInfo().username], {
-        cwd: runnerDir,
-        stdio: ["inherit", "pipe", "pipe"],
-        timeoutMs: 120000,
-      });
-      if (res.exitCode === 0) {
-        return { success: true, message: "Systemd persistent service installed successfully." };
-      }
-      return { success: false, message: res.stderr || res.stdout };
-    }
-    return { success: false, message: "svc.sh not found in runner directory." };
   }
+  return installLinuxRunnerService(runnerDir);
 }
 
 /**
@@ -386,7 +457,10 @@ export async function installService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ 
 export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
   const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
-    const res = await startDockerContainer(localMeta.containerName);
+    const res = await startDockerContainer(localMeta.containerName, {
+      name: localMeta.name,
+      url: localMeta.url,
+    });
     return {
       success: res.success,
       message: res.success
@@ -403,15 +477,12 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
     };
   }
 
-  if (process.platform === "win32") {
-    // Check if run.cmd exists
-    const runCmd = path.join(runnerDir, "run.cmd");
-    if (!fs.existsSync(runCmd)) {
-      return { success: false, message: `Runner run.cmd not found at ${runCmd}` };
-    }
+  const readinessError = getRunnerStartError(runnerDir);
+  if (readinessError) return { success: false, message: readinessError };
 
+  if (process.platform === "win32") {
     // Launch run.cmd in detached background mode if not already running
-    await fsPromises.mkdir(DEFAULT_BASE_DIR, { recursive: true, mode: 0o700 });
+    await ensureDir(DEFAULT_BASE_DIR);
     const pidFile = getRunnerPidFile(runnerDir);
 
     await ensureRunnerEnvironment(runnerDir);
@@ -459,19 +530,7 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
 
     return { success: false, message: "Failed to spawn runner process." };
   } else {
-    const svcPath = path.join(runnerDir, "svc.sh");
-    if (!fs.existsSync(svcPath)) {
-      return { success: false, message: `Runner service script not found at ${svcPath}` };
-    }
-    const res = await execCommand("sudo", ["./svc.sh", "start"], {
-      cwd: runnerDir,
-      stdio: ["inherit", "pipe", "pipe"],
-      timeoutMs: 120000,
-    });
-    return {
-      success: res.exitCode === 0,
-      message: res.exitCode === 0 ? "Runner systemd service started." : (res.stderr || res.stdout),
-    };
+    return startLinuxRunnerService(runnerDir);
   }
 }
 
@@ -481,7 +540,10 @@ export async function startService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ su
 export async function stopService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ success: boolean; message: string }> {
   const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
-    const res = await stopDockerRunner(localMeta.containerName);
+    const res = await stopDockerRunner(localMeta.containerName, {
+      name: localMeta.name,
+      url: localMeta.url,
+    });
     return {
       success: res.success,
       message: res.success
@@ -513,20 +575,12 @@ export async function stopService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ suc
 
     return { success: true, message: pids.size ? "Runner process stopped." : "Runner is not running." };
   } else {
-    const svcPath = path.join(runnerDir, "svc.sh");
-    const serviceInstalled = fs.existsSync(path.join(runnerDir, ".service"));
+    const serviceInfo = await readLinuxServiceUnit(runnerDir);
+    if (serviceInfo.error) return { success: false, message: serviceInfo.error };
+    const serviceInstalled = Boolean(serviceInfo.unitName);
     if (serviceInstalled) {
-      if (!fs.existsSync(svcPath)) {
-        return { success: false, message: `Runner service script not found at ${svcPath}` };
-      }
-      const res = await execCommand("sudo", ["./svc.sh", "stop"], {
-        cwd: runnerDir,
-        stdio: ["inherit", "pipe", "pipe"],
-        timeoutMs: 120000,
-      });
-      if (res.exitCode !== 0) {
-        return { success: false, message: res.stderr || res.stdout || "Failed to stop runner systemd service." };
-      }
+      const stopped = await stopLinuxRunnerService(runnerDir);
+      if (!stopped.success) return stopped;
     }
 
     const pids = await findRunnerListenerPids(runnerDir);
@@ -571,7 +625,10 @@ export async function restartService(runnerDir = DEFAULT_RUNNER_DIR): Promise<{ 
   const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
     const containerName = localMeta.containerName || DEFAULT_CONTAINER_NAME;
-    const result = await restartDockerRunner(containerName);
+    const result = await restartDockerRunner(containerName, {
+      name: localMeta.name,
+      url: localMeta.url,
+    });
     return {
       success: result.success,
       message: result.success ? `Docker runner container '${containerName}' restarted.` : result.output,
@@ -594,40 +651,66 @@ export async function removeRunner(
   runnerDir = DEFAULT_RUNNER_DIR,
   token: string
 ): Promise<{ success: boolean; output: string }> {
+  const tokenValidation = validateRegistrationToken(token);
+  if (!tokenValidation.valid) return { success: false, output: tokenValidation.error || "Invalid runner removal token." };
+
   const localMeta = await readMetadataForRunner(runnerDir);
   if (localMeta?.mode === "docker") {
-    const res = await removeDockerRunner(token, localMeta.containerName);
-    if (res.success) await removeLocalMetadata(localMeta);
+    const res = await removeDockerRunner(token, localMeta.containerName, true, {
+      name: localMeta.name,
+      url: localMeta.url,
+    });
+    if (res.success) {
+      try {
+        await removeLocalMetadata(localMeta);
+      } catch (error) {
+        return {
+          success: false,
+          output: redactSecret(
+            `Runner was removed from Docker and GitHub, but local metadata could not be removed: ${error instanceof Error ? error.message : String(error)}`,
+            token
+          ),
+        };
+      }
+    }
     return res;
   }
 
-  // Stop service first
-  await stopService(runnerDir).catch(() => {});
+  // Stop and uninstall services before unregistering to avoid leaving a live runner behind.
+  const stopped = await stopService(runnerDir);
+  if (!stopped.success) return { success: false, output: stopped.message };
 
-  if (process.platform !== "win32") {
-    const svcPath = path.join(runnerDir, "svc.sh");
-    if (fs.existsSync(svcPath)) {
-      await execCommand("sudo", ["./svc.sh", "uninstall"], {
-        cwd: runnerDir,
-        stdio: ["inherit", "pipe", "pipe"],
-        timeoutMs: 120000,
-      }).catch(() => {});
-    }
+  if (process.platform === "linux") {
+    const uninstalled = await uninstallLinuxRunnerService(runnerDir);
+    if (!uninstalled.success) return { success: false, output: uninstalled.message };
   }
 
   const script = process.platform === "win32" ? "config.cmd" : "./config.sh";
   const cmd = process.platform === "win32" ? path.join(runnerDir, script) : script;
 
-  const result = await execCommand(cmd, ["remove", "--token", token], {
+  const result = await execCommand(cmd, ["remove"], {
     cwd: runnerDir,
     timeoutMs: 30000,
+    env: { ...process.env, ACTIONS_RUNNER_INPUT_TOKEN: token },
   });
 
-  if (result.exitCode === 0 && localMeta) await removeLocalMetadata(localMeta);
+  if (result.exitCode === 0 && localMeta) {
+    try {
+      await removeLocalMetadata(localMeta);
+    } catch (error) {
+      return {
+        success: false,
+        output: redactSecret(
+          `Runner was removed from GitHub, but local metadata could not be removed: ${error instanceof Error ? error.message : String(error)}`,
+          token
+        ),
+      };
+    }
+  }
 
   return {
     success: result.exitCode === 0,
-    output: `${result.stdout}\n${result.stderr}`.trim(),
+    output: redactSecret(`${result.stdout}\n${result.stderr}`.trim(), token),
   };
 }
 
@@ -678,12 +761,9 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
         }
       }
     }
-  } else {
-    // Status is readable without sudo on systemd; avoid an unnecessary password prompt.
-    const svcPath = path.join(runnerDir, "svc.sh");
-    if (!serviceRunning && fs.existsSync(svcPath) && fs.existsSync(path.join(runnerDir, ".service"))) {
-      const svcRes = await execCommand("./svc.sh", ["status"], { cwd: runnerDir, timeoutMs: 10000 });
-      serviceRunning = svcRes.exitCode === 0 && svcRes.stdout.toLowerCase().includes("active (running)");
+  } else if (process.platform === "linux") {
+    if (!serviceRunning) {
+      serviceRunning = await getLinuxRunnerServiceStatus(runnerDir);
     }
   }
 
@@ -693,7 +773,9 @@ export async function getRunnerStatus(runnerDir = DEFAULT_RUNNER_DIR): Promise<R
     runnerName: officialConfig?.runnerName || localMeta?.name,
     targetUrl: officialConfig?.serverUrl || localMeta?.url,
     labels: localMeta?.labels,
-    serviceInstalled: process.platform === "win32" ? false : fs.existsSync(path.join(runnerDir, ".service")),
+    serviceInstalled: process.platform === "linux"
+      ? (await readLinuxServiceUnit(runnerDir)).installed
+      : false,
     serviceRunning,
     activePid,
     mode: localMeta?.mode,
@@ -770,14 +852,22 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
     // Check if container is running; if not, restart it
     const status = await getDockerRunnerStatus(container);
     if (!status.running) {
-      const started = await startDockerContainer(container);
+      const started = await startDockerContainer(container, {
+        name: localMeta.name,
+        url: localMeta.url,
+      });
       if (!started.success) {
         console.error(started.output);
         return 1;
       }
     }
-    await tailDockerRunnerLogs(container, true);
-    return 0;
+    return tailDockerRunnerLogs(container, true);
+  }
+
+  const readinessError = getRunnerStartError(runnerDir);
+  if (readinessError) {
+    console.error(readinessError);
+    return 1;
   }
 
   const runnerStatus = await getRunnerStatus(runnerDir);
@@ -827,10 +917,10 @@ export async function runForeground(runnerDir = DEFAULT_RUNNER_DIR): Promise<num
     process.on("SIGINT", cleanup);
     process.on("SIGTERM", cleanup);
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       process.off("SIGINT", cleanup);
       process.off("SIGTERM", cleanup);
-      resolve(code ?? 0);
+      resolve(code ?? (signal ? 1 : 0));
     });
     child.on("error", () => {
       process.off("SIGINT", cleanup);
@@ -871,10 +961,6 @@ async function findRunnerListenerPids(runnerDir: string): Promise<number[]> {
         if (!match || !match[1] || !match[2]) continue;
         const pid = Number.parseInt(match[1], 10);
         const command = match[2];
-        if (command.includes(expectedExecutable) || command.includes(`${runnerDirAbsolute}${path.sep}`)) {
-          pids.add(pid);
-          continue;
-        }
         try {
           const executable = (await fsPromises.readlink(path.join("/proc", String(pid), "exe"))).replace(/ \(deleted\)$/, "");
           if (path.resolve(executable) === expectedExecutable) {
@@ -884,7 +970,13 @@ async function findRunnerListenerPids(runnerDir: string): Promise<number[]> {
         } catch {}
         try {
           const cwd = await fsPromises.readlink(path.join("/proc", String(pid), "cwd"));
-          if (path.resolve(cwd) === runnerDirAbsolute) pids.add(pid);
+          const argv0 = command.match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/);
+          const executableArg = argv0?.[1] || argv0?.[2] || argv0?.[3];
+          if (executableArg) {
+            const lexicalArg = path.resolve(cwd, executableArg);
+            const resolvedArg = await fsPromises.realpath(lexicalArg).catch(() => lexicalArg);
+            if (resolvedArg === expectedExecutable) pids.add(pid);
+          }
         } catch {}
       }
       return [...pids];
@@ -903,23 +995,38 @@ async function findRunnerListenerPids(runnerDir: string): Promise<number[]> {
     return [...pids];
   }
 
-  const result = await execCommand("pgrep", ["-af", "Runner.Listener"]);
-  if (result.exitCode !== 0 || !result.stdout.trim()) return [];
-  const expectedExecutable = path.resolve(runnerDir, "bin", "Runner.Listener");
-  return result.stdout.split(/\r?\n/).flatMap((line) => {
-    const match = line.match(/^\s*(\d+)\s+(.+)$/);
-    return match?.[1] && match[2]?.includes(expectedExecutable) ? [Number.parseInt(match[1], 10)] : [];
-  });
+  if (process.platform === "darwin") {
+    const candidates = await execCommand("pgrep", ["-x", "Runner.Listener"]);
+    if (candidates.exitCode !== 0 || !candidates.stdout.trim()) return [];
+    const expectedExecutable = await fsPromises.realpath(path.resolve(runnerDir, "bin", "Runner.Listener"))
+      .catch(() => path.resolve(runnerDir, "bin", "Runner.Listener"));
+    const pids = await Promise.all(candidates.stdout.split(/\s+/).flatMap((value) => {
+      const pid = Number.parseInt(value, 10);
+      return Number.isInteger(pid) && pid > 0 ? [pid] : [];
+    }).map(async (pid) => {
+      const executable = await execCommand("lsof", ["-a", "-p", String(pid), "-d", "txt", "-Fn"], { timeoutMs: 5000 });
+      if (executable.exitCode !== 0) return undefined;
+      const paths = executable.stdout.split(/\r?\n/).filter((line) => line.startsWith("n")).map((line) => line.slice(1));
+      const matches = paths.some((candidate) => path.resolve(candidate) === expectedExecutable);
+      return matches ? pid : undefined;
+    }));
+    return pids.filter((pid): pid is number => pid !== undefined);
+  }
+
+  // Avoid treating an arbitrary process argument as proof of runner ownership
+  // on platforms where executable identity cannot be verified safely.
+  return [];
 }
 
 /**
  * Lists active runner processes on the host and Docker containers.
  */
-export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promise<ActiveProcessInfo[]> {
+export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR, baseDir = DEFAULT_BASE_DIR): Promise<ActiveProcessInfo[]> {
   const officialConfig = await readOfficialRunnerConfig(runnerDir);
-  const localMeta = await readMetadataForRunner(runnerDir);
+  const localMeta = await readMetadataForRunner(runnerDir, baseDir);
   const runnerName = officialConfig?.runnerName || localMeta?.name || "dgrunner";
   const targetUrl = officialConfig?.serverUrl || localMeta?.url || "Unknown";
+  const allMetadata = await listLocalRunnerMetadata(baseDir);
 
   const results: ActiveProcessInfo[] = [];
 
@@ -930,7 +1037,11 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
       ["--filter", `label=${DGRUNNER_MANAGED_LABEL}=true`],
       ["--filter", "name=upstand-dgrunner"],
     ];
-    for (const filter of dockerPsFilters) {
+    const legacyContainerNames = new Set([
+      DEFAULT_CONTAINER_NAME,
+      ...allMetadata.filter((metadata) => metadata.mode === "docker").map((metadata) => metadata.containerName || metadata.runnerDir.replace(/^docker:/, "")),
+    ]);
+    for (const [filterIndex, filter] of dockerPsFilters.entries()) {
       const dockerPs = await execCommand("docker", [
         "ps",
         ...filter,
@@ -940,6 +1051,7 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
       const lines = dockerPs.stdout.split(/\r?\n/).filter(Boolean);
       for (const line of lines) {
         const [id, name, status] = line.split("\t");
+        if (filterIndex === 1 && name && !legacyContainerNames.has(name)) continue;
         if (id && name) {
           containersById.set(id, { id, name, status: status || "Up (healthy)" });
         }
@@ -974,7 +1086,7 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
 
       const metadataByContainer = new Map(await Promise.all(containers.map(async (container) => [
         container.name,
-        await readMetadataForRunner(`docker:${container.name}`),
+        await readMetadataForRunner(`docker:${container.name}`, baseDir),
       ] as const)));
       for (const container of containers) {
         const containerMetadata = metadataByContainer.get(container.name);
@@ -991,56 +1103,64 @@ export async function listRunnerProcesses(runnerDir = DEFAULT_RUNNER_DIR): Promi
   } catch {}
 
   // 2. Check Host processes
-  if (process.platform === "win32") {
-    const psCmd = `Get-Process -Name 'Runner.Listener' -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, WorkingSet64 | ConvertTo-Json -Compress`;
-    const res = await execCommand("powershell.exe", ["-NoProfile", "-Command", psCmd]);
-    if (res.exitCode === 0 && res.stdout.trim()) {
+  const nativeRunners: Array<{ runnerDir: string; metadata: RunnerMetadata | undefined }> = allMetadata
+    .filter((metadata) => metadata.mode !== "docker")
+    .map((metadata) => ({ runnerDir: metadata.runnerDir, metadata }));
+  if (!nativeRunners.some((runner) => normalizeRunnerPath(runner.runnerDir) === normalizeRunnerPath(runnerDir))) {
+    nativeRunners.push({
+      runnerDir,
+      metadata: localMeta?.mode === "docker" ? undefined : localMeta || undefined,
+    });
+  }
+  const nativeProcesses = (await Promise.all(nativeRunners.map(async (runner) => ({
+    ...runner,
+    pids: await findRunnerListenerPids(runner.runnerDir),
+  })))).flatMap((runner) => runner.pids.map((pid) => ({ ...runner, pid })));
+
+  const windowsMemoryByPid = new Map<number, number>();
+  if (process.platform === "win32" && nativeProcesses.length > 0) {
+    const managedPids = [...new Set(nativeProcesses.map(({ pid }) => pid))];
+    const result = await execCommand("powershell.exe", ["-NoProfile", "-Command", [
+      "$managedIds = @($env:DGRUNNER_MANAGED_PIDS -split ',' | Where-Object { $_ -match '^\\d+$' } | ForEach-Object { [int]$_ })",
+      "$processes = @(Get-Process -Name 'Runner.Listener' -ErrorAction SilentlyContinue | Where-Object { $managedIds -contains $_.Id } | Select-Object Id, WorkingSet64)",
+      "if ($processes.Count -gt 0) { $processes | ConvertTo-Json -Compress }",
+    ].join("; ")], {
+      env: { ...process.env, DGRUNNER_MANAGED_PIDS: managedPids.join(",") },
+    });
+    if (result.exitCode === 0 && result.stdout.trim()) {
       try {
-        const parsed = JSON.parse(res.stdout);
-        const list = Array.isArray(parsed) ? parsed : [parsed];
-        for (const item of list) {
-          if (item && item.Id) {
-            results.push({
-              pid: item.Id,
-              name: item.ProcessName || "Runner.Listener",
-              runnerName,
-              targetUrl,
-              memoryMb: item.WorkingSet64 ? Math.round(item.WorkingSet64 / (1024 * 1024)) : undefined,
-              status: "Listening",
-            });
+        const parsed: unknown = JSON.parse(result.stdout);
+        const processes = Array.isArray(parsed) ? parsed : [parsed];
+        for (const processInfo of processes) {
+          if (processInfo && typeof processInfo.Id === "number" && typeof processInfo.WorkingSet64 === "number") {
+            windowsMemoryByPid.set(processInfo.Id, Math.round(processInfo.WorkingSet64 / (1024 * 1024)));
           }
         }
       } catch {}
     }
-  } else {
-    // Linux
-    const res = await execCommand("pgrep", ["-a", "Runner.Listener"]);
-    if (res.exitCode === 0 && res.stdout.trim()) {
-      const lines = res.stdout.split(/\r?\n/).filter(Boolean);
-      const processes: Array<{ pid: number; name: string }> = [];
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        const pid = parseInt(parts[0], 10);
-        if (!isNaN(pid)) {
-          processes.push({ pid, name: "Runner.Listener" });
-        }
-      }
-      const processMemory = await Promise.all(processes.map(async ({ pid }) => [
-        pid,
-        await readLinuxProcessMemoryMb(pid),
-      ] as const));
-      const memoryByPid = new Map(processMemory);
-      for (const runnerProcess of processes) {
-        results.push({
-          pid: runnerProcess.pid,
-          name: runnerProcess.name,
-          runnerName,
-          targetUrl,
-          memoryMb: memoryByPid.get(runnerProcess.pid),
-          status: "Listening",
-        });
-      }
-    }
+  }
+
+  const linuxMemoryByPid = new Map<number, number | undefined>();
+  if (process.platform === "linux") {
+    const memory = await Promise.all(nativeProcesses.map(async ({ pid }) => [
+      pid,
+      await readLinuxProcessMemoryMb(pid),
+    ] as const));
+    for (const [pid, memoryMb] of memory) linuxMemoryByPid.set(pid, memoryMb);
+  }
+
+  for (const runnerProcess of nativeProcesses) {
+    const config = await readOfficialRunnerConfig(runnerProcess.runnerDir);
+    results.push({
+      pid: runnerProcess.pid,
+      name: "Runner.Listener",
+      runnerName: config?.runnerName || runnerProcess.metadata?.name || "dgrunner",
+      targetUrl: config?.serverUrl || runnerProcess.metadata?.url || "Unknown",
+      memoryMb: process.platform === "win32"
+        ? windowsMemoryByPid.get(runnerProcess.pid)
+        : linuxMemoryByPid.get(runnerProcess.pid),
+      status: "Listening",
+    });
   }
 
   return results;
@@ -1091,19 +1211,17 @@ export async function tailRunnerLogs(options: {
     return;
   }
 
-  if (process.platform !== "win32") {
-    const serviceFile = path.join(runnerDir, ".service");
-    if (!fs.existsSync(serviceFile)) {
+  if (process.platform === "linux") {
+    const service = await getValidatedLinuxServiceUnit(runnerDir);
+    if (service.error) {
+      console.error(service.error);
+      return;
+    }
+    if (!service.unitName) {
       console.log(`No installed runner service found in ${runnerDir}`);
       return;
     }
-    const serviceName = (await fsPromises.readFile(serviceFile, "utf8")).trim();
-    if (!serviceName) {
-      console.log(`Runner service name is empty in ${serviceFile}`);
-      return;
-    }
-    const unitName = serviceName.endsWith(".service") ? serviceName : `${serviceName}.service`;
-    const args = ["journalctl", "--no-pager", "--unit", unitName, "--lines", String(linesCount)];
+    const args = ["journalctl", "--no-pager", "--unit", service.unitName, "--lines", String(linesCount)];
     if (options.follow) args.push("--follow");
     const code = await execInteractive("sudo", args);
     if (code !== 0) console.error(`Could not read runner service logs (exit code ${code}).`);

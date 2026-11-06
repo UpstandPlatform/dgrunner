@@ -8,15 +8,25 @@ import { execCommand } from "./exec.js";
  * Ensure directory exists with secure permissions (0700 on POSIX).
  */
 export async function ensureDir(dirPath: string, mode = 0o700): Promise<void> {
-  if (!fs.existsSync(dirPath)) {
-    await fsPromises.mkdir(dirPath, { recursive: true, mode });
+  const currentStat = await fsPromises.stat(dirPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (currentStat && !currentStat.isDirectory()) {
+    throw new Error(`Expected a directory at ${dirPath}.`);
   }
-  // If on Linux/POSIX, enforce permissions
+  if (!currentStat) await fsPromises.mkdir(dirPath, { recursive: true, mode });
+  const stat = await fsPromises.stat(dirPath);
+  if (!stat.isDirectory()) {
+    throw new Error(`Expected a directory at ${dirPath}.`);
+  }
+  // If on Linux/POSIX, enforce permissions instead of silently keeping an
+  // insecure pre-existing directory mode.
   if (process.platform !== "win32") {
-    try {
-      await fsPromises.chmod(dirPath, mode);
-    } catch {
-      // Ignore if chmod fails due to container / mount restrictions
+    await fsPromises.chmod(dirPath, mode);
+    const securedStat = await fsPromises.stat(dirPath);
+    if ((securedStat.mode & 0o777) !== (mode & 0o777)) {
+      throw new Error(`Could not enforce secure permissions on directory ${dirPath}.`);
     }
   }
 }

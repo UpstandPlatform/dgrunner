@@ -1,9 +1,18 @@
 import { describe, it, expect } from "vitest";
 import { Command } from "commander";
 import { registerDoctorCommand } from "../src/commands/doctor.js";
-import { runDoctorChecks } from "../src/core/doctor.js";
+import { isTargetEnvironmentCompatible, runDoctorChecks } from "../src/core/doctor.js";
 
 describe("Doctor Module", () => {
+  it("rejects runner targets that cannot be configured from the current host environment", () => {
+    expect(isTargetEnvironmentCompatible("windows", "linux")).toBe(false);
+    expect(isTargetEnvironmentCompatible("windows", "win32")).toBe(true);
+    expect(isTargetEnvironmentCompatible("wsl", "linux", false)).toBe(false);
+    expect(isTargetEnvironmentCompatible("wsl", "linux", true)).toBe(true);
+    expect(isTargetEnvironmentCompatible("docker", "linux")).toBe(true);
+    expect(isTargetEnvironmentCompatible("native", "darwin")).toBe(false);
+  });
+
   it("exposes environment-specific checks through the CLI", () => {
     const program = new Command();
     registerDoctorCommand(program);
@@ -39,7 +48,10 @@ describe("Doctor Module", () => {
   it("should configure checks appropriately for targetEnv: windows", async () => {
     const report = await runDoctorChecks({ targetEnv: "windows" });
     const platformCheck = report.checks.find((c) => c.id === "platform");
+    const isolationCheck = report.checks.find((c) => c.id === "runner-isolation");
     expect(platformCheck).toBeDefined();
+    expect(isolationCheck?.status).toBe("warn");
+    expect(isolationCheck?.detail).toContain("does not currently isolate native jobs");
     if (process.platform === "win32") {
       expect(platformCheck?.status).toBe("pass");
     }
@@ -49,6 +61,9 @@ describe("Doctor Module", () => {
     const report = await runDoctorChecks({ targetEnv: "wsl" });
     expect(report.checks.some((check) => check.id === "git-bash")).toBe(false);
     expect(report.checks.some((check) => check.id === "wsl-cli")).toBe(true);
+    const isolationCheck = report.checks.find((check) => check.id === "runner-isolation");
+    expect(isolationCheck?.status).toBe("warn");
+    expect(isolationCheck?.detail).toContain("Default WSL automounts can expose Windows drives");
     if (process.platform === "win32") {
       expect(report.checks.some((check) => check.id === "wsl-distros")).toBe(true);
     }

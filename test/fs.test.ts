@@ -39,6 +39,24 @@ describe("FS Utilities", () => {
     expect(freeBytes).toBeGreaterThan(0);
   });
 
+  it("rejects an existing file where a directory is required", async () => {
+    const filePath = path.join(tmpDir, "not-a-directory");
+    await fsPromises.writeFile(filePath, "keep");
+    await expect(ensureDir(filePath)).rejects.toThrow(/Expected a directory/);
+    await expect(fsPromises.readFile(filePath, "utf-8")).resolves.toBe("keep");
+  });
+
+  it("tightens permissions on an existing POSIX data directory", async () => {
+    if (process.platform === "win32") return;
+    const directory = path.join(tmpDir, "existing-data");
+    await fsPromises.mkdir(directory, { mode: 0o777 });
+    await fsPromises.chmod(directory, 0o755);
+
+    await ensureDir(directory);
+
+    expect((await fsPromises.stat(directory)).mode & 0o777).toBe(0o700);
+  });
+
   it("rejects a malformed ZIP instead of reporting extraction success", async () => {
     const archivePath = path.join(tmpDir, "broken.zip");
     await fsPromises.writeFile(archivePath, "not a zip archive");

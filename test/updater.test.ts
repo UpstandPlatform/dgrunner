@@ -9,6 +9,7 @@ import {
   getUpgradeCommand,
   detectPackageManager,
   fetchLatestVersion,
+  isValidNpmDistTag,
   runUpgrade,
 } from "../src/core/updater.js";
 
@@ -73,6 +74,13 @@ describe("Updater Module", () => {
       const res = getUpgradeCommand("npm", "next");
       expect(res.args).toEqual(["install", "-g", "@upstand/dgrunner@next"]);
     });
+
+    it("rejects option-like and URL-like tags before constructing an install command", () => {
+      for (const tag of ["--registry=https://evil.example", "https://evil.example/pkg.tgz", "next/evil", ""]) {
+        expect(isValidNpmDistTag(tag)).toBe(false);
+        expect(() => getUpgradeCommand("npm", tag)).toThrow("Invalid npm distribution tag");
+      }
+    });
   });
 
   describe("detectPackageManager", () => {
@@ -98,6 +106,61 @@ describe("Updater Module", () => {
         vi.unstubAllGlobals();
       }
     });
+
+    it("does not query npm for an invalid distribution tag", async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      execCommandMock.mockReset();
+
+      try {
+        await expect(fetchLatestVersion("https://evil.example/pkg.tgz")).resolves.toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(execCommandMock).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("ignores malformed registry versions and accepts only a strict fallback semver", async () => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ version: { value: "999.0.0" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+      execCommandMock.mockResolvedValueOnce({ exitCode: 0, stdout: "1.2.3junk", stderr: "" });
+
+      try {
+        await expect(fetchLatestVersion("latest")).resolves.toBeNull();
+        expect(execCommandMock).toHaveBeenCalledWith(
+          "npm",
+          ["view", "@upstand/dgrunner@latest", "version"],
+          expect.objectContaining({ timeoutMs: 8000 })
+        );
+      } finally {
+        vi.unstubAllGlobals();
+        execCommandMock.mockReset();
+      }
+    });
+
+    it("rejects oversized and invalid prerelease semver input without throwing", () => {
+      expect(compareSemver("1".repeat(10000) + ".0.0", "1.0.0")).toBe(0);
+      expect(compareSemver("1.0.0-beta.01", "1.0.0-beta.1")).toBe(0);
+    });
+  });
+
+  it("refuses an invalid tag before fetching or installing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    execCommandMock.mockReset();
+
+    try {
+      const result = await runUpgrade({ tag: "https://evil.example/pkg.tgz", force: true });
+      expect(result.error).toContain("Invalid npm distribution tag");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(execCommandMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("does not install globally when upgrade is invoked through npx", async () => {

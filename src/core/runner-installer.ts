@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import crypto from "node:crypto";
 import {
   DEFAULT_BASE_DIR,
   DEFAULT_RUNNER_DIR,
@@ -20,6 +21,8 @@ export interface RunnerPackageInfo {
   downloadUrl: string;
   expectedSha256: string;
 }
+
+export const MAX_RUNNER_ARCHIVE_BYTES = 512 * 1024 * 1024;
 
 export function getPlatformKey(): string {
   const platform = process.platform === "win32" ? "win" : process.platform;
@@ -110,18 +113,20 @@ function isOfficialRunnerAssetUrl(url: string, tagName: string, fileName: string
  */
 export async function downloadAndInstallRunner(
   destDir = DEFAULT_RUNNER_DIR,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  cacheBaseDir = DEFAULT_BASE_DIR,
+  maxArchiveBytes = MAX_RUNNER_ARCHIVE_BYTES
 ): Promise<{ version: string; installDir: string }> {
   await ensureDir(destDir);
 
   const pkg = await resolveRunnerPackage();
   onProgress?.(`Found official runner release v${pkg.version} for ${pkg.platformKey}`);
 
-  const cacheDir = path.join(DEFAULT_BASE_DIR, "cache");
+  const cacheDir = path.join(cacheBaseDir, "cache");
   await ensureDir(cacheDir);
 
   const archivePath = path.join(cacheDir, pkg.fileName);
-  const temporaryArchivePath = `${archivePath}.${process.pid}.${Date.now()}.tmp`;
+  const temporaryArchivePath = `${archivePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 
   // If archive already exists and matches hash, avoid re-download
   let needDownload = true;
@@ -145,10 +150,26 @@ export async function downloadAndInstallRunner(
     if (!res.ok || !res.body) {
       throw new Error(`Failed to download runner package from ${pkg.downloadUrl}: HTTP ${res.status}`);
     }
+    const contentLength = Number(res.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > maxArchiveBytes) {
+      await res.body.cancel().catch(() => {});
+      throw new Error(`Runner archive exceeds the ${maxArchiveBytes}-byte download limit.`);
+    }
 
     try {
       const fileStream = fs.createWriteStream(temporaryArchivePath, { flags: "wx", mode: 0o600 });
-      await pipeline(Readable.fromWeb(res.body as any), fileStream);
+      let downloadedBytes = 0;
+      const sizeLimit = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          downloadedBytes += chunk.length;
+          if (downloadedBytes > maxArchiveBytes) {
+            callback(new Error(`Runner archive exceeds the ${maxArchiveBytes}-byte download limit.`));
+            return;
+          }
+          callback(null, chunk);
+        },
+      });
+      await pipeline(Readable.fromWeb(res.body as ReadableStream<Uint8Array>), sizeLimit, fileStream);
       onProgress?.("Download complete.");
 
       onProgress?.("Verifying SHA-256 package checksum...");

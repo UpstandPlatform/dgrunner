@@ -53,6 +53,7 @@ vi.mock("../src/core/runner-manager.js", () => ({
 vi.mock("../src/core/guide.js", () => ({ writeVerificationWorkflow: vi.fn() }));
 
 import { buildWslSetupArgs, runSetupFlow } from "../src/commands/setup.js";
+import { validateRunnerLabels } from "../src/core/security.js";
 
 describe("Setup flow validation", () => {
   beforeEach(() => vi.resetAllMocks());
@@ -74,12 +75,13 @@ describe("Setup flow validation", () => {
     expect(args.slice(-11)).toEqual([
       "dgrunner",
       "--url", "https://github.com/example/repo",
-      "--token", "runner-token",
       "--name", "runner one",
       "--labels", "self-hosted,linux",
+      "--env", "wsl",
       "--force",
       "--no-service",
     ]);
+    expect(args).not.toContain("runner-token");
   });
 
   it("transfers non-interactive WSL setup and preserves the command arguments", async () => {
@@ -107,8 +109,10 @@ describe("Setup flow validation", () => {
     expect(args).toContain("-l");
     expect(args).toContain("--url");
     expect(args).toContain("https://github.com/example/repo");
-    expect(args).toContain("--token");
-    expect(args).toContain("runner-token");
+    expect(args).not.toContain("--token");
+    expect(args).not.toContain("runner-token");
+    expect(args).toContain("--env");
+    expect(args).toContain("wsl");
     expect(args).toContain("--name");
     expect(args).toContain("runner");
   });
@@ -145,5 +149,105 @@ describe("Setup flow validation", () => {
       .rejects.toThrow("setup exited");
     expect(exit).toHaveBeenCalledWith(1);
     expect(passwordMock).not.toHaveBeenCalled();
+  });
+
+  it("treats native setup on Windows as a Windows runner target", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    const previousExitCode = process.exitCode;
+    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+    doctorMock.mockResolvedValue({ ok: true, hasWarnings: false, checks: [] });
+    downloadRunnerMock.mockResolvedValue(undefined);
+    configureRunnerMock.mockResolvedValue({ success: true, output: "" });
+
+    try {
+      await runSetupFlow({
+        env: "native",
+        url: "https://github.com/example/repo",
+        token: "runner-token-value-123456",
+        name: "runner",
+        service: false,
+      });
+
+      expect(configureRunnerMock).toHaveBeenCalledWith(expect.objectContaining({
+        labels: ["self-hosted", "dgrunner", "windows", process.arch],
+      }));
+    } finally {
+      if (platform) Object.defineProperty(process, "platform", platform);
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("rejects a Windows runner target from Linux even when --force is set", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    const previousExitCode = process.exitCode;
+    Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+    try {
+      await runSetupFlow({
+        env: "windows",
+        url: "https://github.com/example/repo",
+        token: "runner-token-value-123456",
+        force: true,
+      });
+      expect(process.exitCode).toBe(1);
+      expect(doctorMock).not.toHaveBeenCalled();
+      expect(downloadRunnerMock).not.toHaveBeenCalled();
+    } finally {
+      if (platform) Object.defineProperty(process, "platform", platform);
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("rejects conflicting OS and environment flags before any checks run", async () => {
+    const previousExitCode = process.exitCode;
+    try {
+      await runSetupFlow({ env: "docker", os: "windows" });
+      expect(process.exitCode).toBe(1);
+      expect(doctorMock).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("rejects --no-service for Docker because it would silently ignore the flag", async () => {
+    const previousExitCode = process.exitCode;
+    try {
+      await runSetupFlow({ env: "docker", service: false });
+      expect(process.exitCode).toBe(1);
+      expect(doctorMock).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("bounds labels and rejects terminal control characters", () => {
+    expect(validateRunnerLabels(["self-hosted", "linux"]).valid).toBe(true);
+    expect(validateRunnerLabels(["linux\u001b[31mred"]).error).toContain("control characters");
+    expect(validateRunnerLabels(Array.from({ length: 101 }, (_, index) => `label-${index}`)).error).toContain("100 labels");
+    expect(validateRunnerLabels([]).error).toContain("At least one");
+  });
+
+  it("does not claim the runner is active when --no-service is requested", async () => {
+    const previousExitCode = process.exitCode;
+    doctorMock.mockResolvedValue({ ok: true, hasWarnings: false, checks: [] });
+    downloadRunnerMock.mockResolvedValue(undefined);
+    configureRunnerMock.mockResolvedValue({ success: true, output: "" });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      await runSetupFlow({
+        env: "native",
+        service: false,
+        url: "https://github.com/example/repo",
+        token: "runner-token-value-123456",
+        name: "runner",
+        labels: "self-hosted,linux",
+      });
+      expect(startServiceMock).not.toHaveBeenCalled();
+      expect(logSpy.mock.calls.flat().join(" ")).toContain("not currently running");
+      expect(logSpy.mock.calls.flat().join(" ")).toContain("dgrunner run");
+    } finally {
+      logSpy.mockRestore();
+      process.exitCode = previousExitCode;
+    }
   });
 });

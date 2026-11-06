@@ -6,6 +6,10 @@ export function maskToken(token: string): string {
   return `${"*".repeat(Math.min(token.length - 4, 12))}${token.slice(-4)}`;
 }
 
+export function redactSecret(output: string, secret: string): string {
+  return secret ? output.split(secret).join("[REDACTED]") : output;
+}
+
 export const logger = {
   header(title: string): void {
     console.log();

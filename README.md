@@ -94,9 +94,12 @@ GitHub advises against using self-hosted runners on public repositories because 
 4. **Binary Tamper Protection (SHA-256)**
    - All runner binaries are downloaded directly from official GitHub releases and cryptographically verified against official SHA-256 checksums before extraction.
 5. **Ephemeral Secrets**
-   - Short-lived runner tokens are entered via masked prompts and are not logged or persisted by dgrunner. Native runner configuration passes the registration token to GitHub's configuration process as a command-line argument, so local process inspection may expose it briefly; avoid supplying tokens with `--token`. Docker configuration sends the token over stdin.
+   - Short-lived runner tokens are entered via masked prompts and are not logged or persisted by dgrunner. Native configuration/removal pass tokens to the runner through its secret input environment variable rather than child command-line arguments. Docker configuration sends the token over stdin. Supplying a token with dgrunner's `--token` option can still expose it in shell history and the dgrunner process list; prefer the hidden prompt.
 6. **Filesystem Permission Hardening**
    - Directories and local metadata files are created with restricted POSIX permissions (`0700` / `0600`).
+7. **Runner Jobs Are Not Automatically Sandboxed**
+   - Native Windows and WSL jobs run with the runner account's permissions. WSL commonly exposes Windows drives through `/mnt` and supports launching Windows executables, so WSL alone does not make an untrusted job safe from the Windows account. `dgrunner doctor` warns about these execution modes.
+   - Use persistent self-hosted runners only for repositories and workflows you trust. For untrusted code, use a dedicated disposable VM per job. dgrunner does not yet create per-job Windows Sandbox or disposable WSL environments.
 
 ---
 
@@ -218,6 +221,8 @@ Generate the ready-to-use verification workflow:
 dgrunner guide --generate-workflow
 ```
 
+The generator leaves an existing `verify-runner.yml` untouched. Use `dgrunner guide --generate-workflow --force` only when you want to replace it.
+
 Push `.github/workflows/verify-runner.yml` to your repository:
 ```bash
 git add .github/workflows/verify-runner.yml
@@ -271,7 +276,7 @@ When running `dgrunner setup` on Windows, you can choose between:
    - Distro labels (`ubuntu`, `ubuntu-24.04`, `ubuntu-22.04`, `debian`) are automatically injected into runner labels.
    - Runs genuine Linux/Bash jobs on your Windows machine with automatic restart (`--restart unless-stopped`).
    - Does not mount the host Docker socket by default. Use `--docker-socket` only when workflows need it; access to that socket can grant control of the Docker host.
-   - Preserves build caches across container restarts in a dedicated, runner-isolated volume. Re-registering or removing the runner clears its workspace volume.
+   - Preserves build caches across container restarts in a dedicated, runner-isolated volume. Re-registering or removing the runner clears a workspace volume only when its dgrunner ownership labels match; existing unlabeled volumes are left untouched.
 3. **WSL2 Linux Environment**
    - Automatically detects all installed WSL distributions (`Ubuntu`, `Debian`, etc.) and allows selecting or installing a new distribution directly from Microsoft Store (`Ubuntu-24.04`, `Debian`, `kali-linux`, `archlinux`).
    - Dynamically identifies distribution details from `/etc/os-release` and tags labels accordingly.
@@ -323,7 +328,8 @@ dgrunner setup \
 
 **Options:**
 - `-u, --url <url>`: Target GitHub repository or organization URL.
-- `-t, --token <token>`: Optional GitHub Actions registration token. Prefer the hidden prompt to avoid shell history and process-list exposure. Native setup briefly passes the token to GitHub's configuration process in argv.
+- `-t, --token <token>`: Optional GitHub Actions registration token. Prefer the hidden prompt to avoid shell history and process-list exposure.
+- WSL setup prompts for the registration token inside the selected distribution instead of forwarding it in the Windows command line.
 - `-n, --name <name>`: Custom runner name (defaults to `<hostname>-linux-docker` for the default Docker container; additional Docker containers get a stable unique suffix).
 - `-l, --labels <labels>`: Comma-separated custom labels (e.g. `self-hosted,dgrunner,linux,x64,docker,ubuntu-24.04`).
 - `-d, --dir <path>`: Runner installation directory (defaults to `~/.dgrunner/actions-runner`).
@@ -338,7 +344,7 @@ dgrunner setup \
 
 #### Multiple Docker runners
 
-Each Docker runner needs a unique GitHub runner name and Docker container name. dgrunner gives each additional container a stable unique default runner name, its own persistent workspace volume, and a separate metadata record, so managing or removing one runner does not affect the others. Existing installations using the default container name continue to work.
+Each Docker runner needs a unique GitHub runner name and Docker container name. dgrunner gives each additional container a stable unique default runner name, its own persistent workspace volume, and a separate metadata record, so managing or removing one runner does not affect the others. Existing installations using the default container name continue to work. Volumes without dgrunner ownership labels are never removed automatically.
 
 Use the runner name or container name to select an instance with lifecycle commands:
 

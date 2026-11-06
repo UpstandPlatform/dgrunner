@@ -5,7 +5,13 @@ import pc from "picocolors";
 import { input, password, select, confirm } from "@inquirer/prompts";
 import { DEFAULT_RUNNER_DIR } from "../config/constants.js";
 import { runDoctorChecks } from "../core/doctor.js";
-import { validateGitHubUrl, validateRegistrationToken } from "../core/security.js";
+import {
+  normalizeRunnerLabels,
+  validateGitHubUrl,
+  validateRegistrationToken,
+  validateRunnerLabels,
+  validateRunnerName,
+} from "../core/security.js";
 import { downloadAndInstallRunner } from "../core/runner-installer.js";
 import { configureRunner, installService, startService } from "../core/runner-manager.js";
 import {
@@ -15,6 +21,8 @@ import {
   DOCKER_DISTRO_PRESETS,
   getDefaultDockerRunnerName,
   validateDockerContainerName,
+  validateDockerImageReference,
+  getDockerArchitectureLabel,
 } from "../core/docker-runner.js";
 import {
   isWsl,
@@ -55,9 +63,9 @@ export function buildWslSetupArgs(options: SetupOptions, distro?: string): strin
   };
 
   addOption("--url", options.url);
-  addOption("--token", options.token);
   addOption("--name", options.name);
   addOption("--labels", options.labels);
+  setupArgs.push("--env", "wsl");
   if (options.dir && options.dir.toLowerCase() !== DEFAULT_RUNNER_DIR.toLowerCase()) {
     addOption("--dir", options.dir);
   }
@@ -84,7 +92,13 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
   if (options.env) {
     const norm = options.env.toLowerCase();
     if (norm === "docker" || norm === "wsl" || norm === "windows" || norm === "native") {
-      targetEnv = norm as any;
+      // "native" means the current host OS. Preserve Windows labels and paths
+      // when users explicitly choose native mode from Windows.
+      targetEnv = norm === "native" && process.platform === "win32" ? "windows" : norm;
+    } else {
+      logger.error(`Unsupported target environment '${options.env}'.`);
+      process.exitCode = 1;
+      return;
     }
   } else if (options.os) {
     const norm = options.os.toLowerCase();
@@ -92,6 +106,10 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       targetEnv = process.platform === "win32" ? "docker" : "native";
     } else if (norm === "windows") {
       targetEnv = "windows";
+    } else {
+      logger.error(`Unsupported target OS '${options.os}'. Choose windows or linux.`);
+      process.exitCode = 1;
+      return;
     }
   }
 
@@ -138,6 +156,48 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
   // Fallback default
   if (!targetEnv) {
     targetEnv = process.platform === "win32" ? "windows" : "native";
+  }
+
+  if (options.env && options.os) {
+    const requestedOsTarget = options.os.toLowerCase() === "linux"
+      ? (process.platform === "win32" ? "docker" : "native")
+      : "windows";
+    if (targetEnv !== requestedOsTarget) {
+      logger.error("--os conflicts with --env; use one consistent target.");
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  if (targetEnv === "windows" && process.platform !== "win32") {
+    logger.error("Windows native runners can only be configured from a Windows host. Use --env native or --env docker on Linux.");
+    process.exitCode = 1;
+    return;
+  }
+  if (targetEnv === "wsl" && process.platform !== "win32" && !isWsl()) {
+    logger.error("WSL runners must be configured from Windows or from inside a WSL distribution.");
+    process.exitCode = 1;
+    return;
+  }
+  if ((options.image || options.dockerSocket) && targetEnv !== "docker") {
+    logger.error("--image and --docker-socket can only be used with Docker runner setup (--env docker).");
+    process.exitCode = 1;
+    return;
+  }
+  if (options.distro && targetEnv !== "docker" && targetEnv !== "wsl") {
+    logger.error("--distro can only be used with Docker or WSL runner setup.");
+    process.exitCode = 1;
+    return;
+  }
+  if (options.service === false && targetEnv === "docker") {
+    logger.error("--no-service is not supported for Docker runners because the runner needs a persistent container.");
+    process.exitCode = 1;
+    return;
+  }
+  if (targetEnv === "docker" && !getDockerArchitectureLabel()) {
+    logger.error(`Docker runners are supported only on x64 or arm64 hosts (received ${process.arch}).`);
+    process.exitCode = 1;
+    return;
   }
 
   if (options.containerName && targetEnv !== "docker") {
@@ -223,6 +283,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
 
     const wslCmdArgs = buildWslSetupArgs(options, selectedWslDistro);
     if (!isInteractive) {
+      if (options.token) logger.info("The registration token will be prompted inside WSL so it is not forwarded in the WSL command line.");
       logger.info(`Transferring non-interactive setup into WSL2 [${distroName}]...`);
       const exitCode = await execInteractive("wsl.exe", wslCmdArgs);
       if (exitCode !== 0) process.exitCode = exitCode;
@@ -236,6 +297,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       });
 
       if (launch) {
+        if (options.token) logger.info("The registration token will be prompted inside WSL so it is not forwarded in the WSL command line.");
         logger.info(`Transferring execution into WSL2 [${distroName}]...`);
         const exitCode = await execInteractive("wsl.exe", wslCmdArgs);
         if (exitCode !== 0) process.exitCode = exitCode;
@@ -263,6 +325,15 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       process.exit(1);
     } else {
       logger.warn("Critical pre-flight checks failed, but continuing due to --force flag.");
+      for (const check of report.checks.filter((entry) => entry.status === "fail")) {
+        logger.warn(`${check.name}: ${check.message}`);
+      }
+    }
+  } else if (report.hasWarnings) {
+    logger.warn("Pre-flight checks passed with warnings:");
+    for (const check of report.checks.filter((entry) => entry.status === "warn")) {
+      logger.warn(`${check.name}: ${check.message}`);
+      if (check.remediation) logger.dim(`  Fix: ${check.remediation}`);
     }
   } else {
     logger.success("Pre-flight checks passed.");
@@ -272,7 +343,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
   logger.step(2, 4, "Configuring GitHub Actions Runner parameters...");
 
   let selectedDistro = options.distro;
-  let customImage = options.image;
+  let customImage = options.image?.trim() || undefined;
 
   if (targetEnv === "docker") {
     if (isInteractive && !selectedDistro && !customImage) {
@@ -299,10 +370,10 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       });
 
       if (distroChoice === "custom") {
-        customImage = await input({
+        customImage = (await input({
           message: "Enter custom Docker runner image tag (e.g. my-org/actions-runner:latest):",
           validate: (val) => (val.trim().length > 0 ? true : "Image tag cannot be empty"),
-        });
+        })).trim();
         selectedDistro = "custom";
       } else {
         selectedDistro = distroChoice;
@@ -312,16 +383,49 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
 
   const presetKey = selectedDistro ? selectedDistro.toLowerCase() : undefined;
   const dockerPreset = presetKey ? DOCKER_DISTRO_PRESETS[presetKey] : undefined;
+  if (targetEnv === "docker" && selectedDistro && !dockerPreset && selectedDistro.toLowerCase() !== "custom") {
+    logger.error(`Unsupported Docker distro '${selectedDistro}'. Choose ubuntu-24.04, ubuntu-22.04, debian, or provide --image.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (targetEnv === "docker" && selectedDistro?.toLowerCase() === "custom" && !customImage) {
+    logger.error("The custom Docker distro requires an image supplied with --image.");
+    process.exitCode = 1;
+    return;
+  }
   const targetImage = customImage || dockerPreset?.image || DEFAULT_DOCKER_RUNNER_IMAGE;
+  const imageValidationError = targetEnv === "docker" ? validateDockerImageReference(targetImage) : null;
+  if (imageValidationError) {
+    logger.error(imageValidationError);
+    process.exitCode = 1;
+    return;
+  }
   const targetDistroName = dockerPreset?.name || (customImage ? "Custom Docker Image" : (selectedDistro || "Ubuntu 24.04 LTS (Noble)"));
 
   let targetUrl = options.url;
   let token = options.token;
   let runnerName = options.name;
-  let labels = options.labels ? options.labels.split(",").map((l) => l.trim()) : undefined;
+  let labels = options.labels !== undefined
+    ? normalizeRunnerLabels(options.labels.split(","))
+    : undefined;
+  if (labels?.length === 0) labels = undefined;
 
   const hostDistro = await detectLinuxDistro();
   const runningInWsl = isWsl();
+  const defaultRunnerName = targetEnv === "docker"
+    ? getDefaultDockerRunnerName(options.containerName || DEFAULT_CONTAINER_NAME)
+    : targetEnv === "windows"
+      ? `${os.hostname().toLowerCase()}-dgrunner`
+      : `${os.hostname().toLowerCase()}-linux`;
+  const defaultRunnerLabels = targetEnv === "docker"
+    ? (dockerPreset
+        ? [...dockerPreset.defaultLabels]
+        : ["self-hosted", "linux", getDockerArchitectureLabel() || "x64", "docker", "dgrunner"])
+    : targetEnv === "windows"
+      ? ["self-hosted", "dgrunner", "windows", process.arch]
+      : runningInWsl
+        ? ["self-hosted", "dgrunner", "linux", "wsl", hostDistro?.id || "ubuntu", process.arch]
+        : ["self-hosted", "dgrunner", "linux", hostDistro?.id || "linux", process.arch];
 
   if (isInteractive) {
     if (!targetUrl) {
@@ -343,6 +447,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       });
     }
 
+    targetUrl = targetUrl.trim();
     const urlValidation = validateGitHubUrl(targetUrl);
     if (!urlValidation.valid) {
       logger.error(`Invalid URL: ${urlValidation.error}`);
@@ -363,37 +468,22 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
     }
 
     if (!runnerName) {
-      const defaultName =
-        targetEnv === "docker"
-          ? getDefaultDockerRunnerName(options.containerName || DEFAULT_CONTAINER_NAME)
-          : targetEnv === "windows"
-          ? `${os.hostname().toLowerCase()}-dgrunner`
-          : `${os.hostname().toLowerCase()}-linux`;
-
       runnerName = await input({
         message: "Enter runner name:",
-        default: defaultName,
+        default: defaultRunnerName,
       });
     }
 
     if (!labels) {
-      const defaultLabels =
-        targetEnv === "docker"
-          ? (dockerPreset ? dockerPreset.defaultLabels.join(",") : "self-hosted,linux,x64,docker,dgrunner")
-          : targetEnv === "windows"
-          ? `self-hosted,dgrunner,windows,${process.arch}`
-          : (runningInWsl
-              ? `self-hosted,dgrunner,linux,wsl,${hostDistro?.id || "ubuntu"},${process.arch}`
-              : `self-hosted,dgrunner,linux,${hostDistro?.id || "linux"},${process.arch}`);
-
       const labelsInput = await input({
         message: "Enter custom runner labels (comma-separated):",
-        default: defaultLabels,
+        default: defaultRunnerLabels.join(","),
       });
-      labels = labelsInput.split(",").map((l) => l.trim()).filter(Boolean);
+      labels = normalizeRunnerLabels(labelsInput.split(","));
     }
   } else {
     // Validate provided CLI options
+    targetUrl = targetUrl?.trim();
     const urlValidation = validateGitHubUrl(targetUrl!);
     if (!urlValidation.valid) {
       logger.error(`Invalid URL: ${urlValidation.error}`);
@@ -407,24 +497,26 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
     }
 
     if (!runnerName) {
-      runnerName =
-        targetEnv === "docker"
-          ? getDefaultDockerRunnerName(options.containerName || DEFAULT_CONTAINER_NAME)
-          : targetEnv === "windows"
-          ? `${os.hostname().toLowerCase()}-dgrunner`
-          : `${os.hostname().toLowerCase()}-linux`;
+      runnerName = defaultRunnerName;
     }
 
     if (!labels) {
-      labels =
-        targetEnv === "docker"
-          ? (dockerPreset ? [...dockerPreset.defaultLabels] : ["self-hosted", "linux", "x64", "docker", "dgrunner"])
-          : targetEnv === "windows"
-          ? ["self-hosted", "dgrunner", "windows", process.arch]
-          : (runningInWsl
-              ? ["self-hosted", "dgrunner", "linux", "wsl", hostDistro?.id || "ubuntu", process.arch]
-              : ["self-hosted", "dgrunner", "linux", hostDistro?.id || "linux", process.arch]);
+      labels = [...defaultRunnerLabels];
     }
+  }
+
+  const labelsValidation = validateRunnerLabels(labels || []);
+  if (!labelsValidation.valid) {
+    logger.error(labelsValidation.error || "Invalid runner labels.");
+    process.exitCode = 1;
+    return;
+  }
+  runnerName = runnerName?.trim();
+  const runnerNameValidation = runnerName ? validateRunnerName(runnerName) : { valid: false, error: "Runner name cannot be empty." };
+  if (!runnerNameValidation.valid) {
+    logger.error(runnerNameValidation.error || "Invalid runner name.");
+    process.exitCode = 1;
+    return;
   }
 
   // Step 3 & 4: Execution based on Target Environment
@@ -478,7 +570,9 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
           });
           logger.success(`Verification workflow generated at: ${pc.bold(wfPath)}`);
         }
-      } catch {}
+      } catch (error) {
+        logger.warn(`Could not generate verification workflow: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     // Summary Box for Docker Runner
@@ -515,7 +609,7 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
       process.exit(1);
     }
 
-    const effectiveMode = runningInWsl ? "wsl" : (process.platform === "win32" ? "native" : "native");
+    const effectiveMode = runningInWsl ? "wsl" : "native";
     const hostDistroName = hostDistro?.name || (process.platform === "win32" ? "Windows Native" : "Linux Native");
 
     logger.step(4, 4, "Registering runner with GitHub...");
@@ -540,23 +634,35 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
 
     // Install and start service if requested
     const shouldInstallService = options.service !== false;
+    let runnerRunning = false;
     if (shouldInstallService) {
       logger.info(process.platform === "win32"
         ? "Starting the Windows runner as a background process..."
         : "Setting up the persistent Linux runner service...");
+      let serviceReady = true;
       if (process.platform !== "win32") {
         const installRes = await installService(installDir);
-        if (!installRes.success) logger.warn(`Could not install runner service: ${installRes.message}`);
+        if (!installRes.success) {
+          serviceReady = false;
+          process.exitCode = 1;
+          logger.error(`Could not install runner service: ${installRes.message}`);
+        }
       }
-      const startRes = await startService(installDir);
-      if (startRes.success) {
-        logger.success(process.platform === "win32"
-          ? "Runner background process started. It does not auto-start after Windows sign-out or reboot."
-          : "Persistent runner service started in the background.");
-      } else {
-        logger.warn(`Could not start service automatically: ${startRes.message}`);
-        logger.info(`You can start it manually with: ${pc.cyan("dgrunner start")}`);
+      if (serviceReady) {
+        const startRes = await startService(installDir);
+        if (startRes.success) {
+          runnerRunning = true;
+          logger.success(process.platform === "win32"
+            ? "Runner background process started. It does not auto-start after Windows sign-out or reboot."
+            : "Persistent runner service started in the background.");
+        } else {
+          process.exitCode = 1;
+          logger.error(`Could not start the runner: ${startRes.message}`);
+          logger.info(`You can start it manually with: ${pc.cyan("dgrunner run")}`);
+        }
       }
+    } else {
+      logger.info("Runner registered with GitHub and left stopped as requested.");
     }
 
     // Offer to generate test workflow if in interactive mode
@@ -574,7 +680,9 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
           });
           logger.success(`Verification workflow generated at: ${pc.bold(wfPath)}`);
         }
-      } catch {}
+      } catch (error) {
+        logger.warn(`Could not generate verification workflow: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     // Summary Box for Host Runner
@@ -588,12 +696,16 @@ export async function runSetupFlow(options: SetupOptions = {}): Promise<void> {
         `Directory:   ${installDir}`,
         `Token:       ${maskToken(token!)} (used ephemerally, not stored)`,
         "",
-        pc.green("✔ Your PC is now active as a secure self-hosted runner!"),
+        runnerRunning
+          ? pc.green("✔ Your PC is now active as a self-hosted runner.")
+          : pc.yellow("Runner registered with GitHub but is not currently running."),
         "",
         `Check status:   ${pc.cyan("dgrunner status")}`,
         `View live logs: ${pc.cyan("dgrunner logs --follow")}`,
         `List processes: ${pc.cyan("dgrunner ps")}`,
-        `Stop runner:    ${pc.cyan("dgrunner stop")}`,
+        runnerRunning
+          ? `Stop runner:    ${pc.cyan("dgrunner stop")}`
+          : `Start runner:   ${pc.cyan("dgrunner run")}`,
       ],
       "green"
     );
@@ -609,7 +721,7 @@ export function registerSetupCommand(program: Command): void {
     .option("-n, --name <name>", "Runner name")
     .option("-l, --labels <labels>", "Comma-separated custom runner labels")
     .option("-d, --dir <path>", "Runner installation directory", DEFAULT_RUNNER_DIR)
-    .option("--os <os>", "Target runner OS: 'windows' or 'linux' (on Windows, 'linux' uses Docker container)")
+    .addOption(new Option("--os <os>", "Target runner OS: 'windows' or 'linux' (on Windows, 'linux' uses Docker container)").choices(["windows", "linux"]))
     .addOption(new Option("--env <environment>", "Target runner environment: 'windows', 'docker', 'wsl', or 'native'")
       .choices(["windows", "docker", "wsl", "native"]))
     .option("--distro <distro>", "Linux distribution preset ('ubuntu-24.04', 'ubuntu-22.04', 'debian') or WSL distro name")

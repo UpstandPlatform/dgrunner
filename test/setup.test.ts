@@ -31,6 +31,15 @@ describe("Setup command options", () => {
     expect(containerNameOption).toBeDefined();
   });
 
+  it("restricts --os to supported runner operating systems", () => {
+    const program = new Command();
+    registerSetupCommand(program);
+    const setup = program.commands.find((command) => command.name() === "setup");
+    const osOption = setup?.options.find((option) => option.long === "--os");
+
+    expect(osOption?.argChoices).toEqual(["windows", "linux"]);
+  });
+
   it("rejects an invalid --env value during CLI parsing", async () => {
     const program = new Command();
     program.exitOverride();

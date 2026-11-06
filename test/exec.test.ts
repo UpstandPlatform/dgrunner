@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import os from "node:os";
-import { execCommand } from "../src/utils/exec.js";
+import { execCommand, execInteractive } from "../src/utils/exec.js";
 import { DEFAULT_RUNNER_DIR } from "../src/config/constants.js";
 
 describe("Exec Utility", () => {
@@ -33,6 +33,27 @@ describe("Exec Utility", () => {
     });
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("Command timed out");
+  });
+
+  it("caps captured child output and marks truncation", async () => {
+    const result = await execCommand(process.execPath, [
+      "-e",
+      "process.stdout.write('x'.repeat(2 * 1024 * 1024)); process.stderr.write('y'.repeat(2 * 1024 * 1024));",
+    ]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length).toBeLessThan(1_050_000);
+    expect(result.stderr.length).toBeLessThan(1_050_000);
+    expect(result.stdout).toContain("[output truncated after 1048576 bytes]");
+    expect(result.stderr).toContain("[output truncated after 1048576 bytes]");
+  });
+
+  it("treats a child closed by signal as failure", async () => {
+    if (process.platform === "win32") return;
+    const result = await execInteractive(process.execPath, [
+      "-e",
+      "process.kill(process.pid, 'SIGTERM');",
+    ]);
+    expect(result).not.toBe(0);
   });
 
   it("should successfully execute config.cmd on Windows when present", async () => {

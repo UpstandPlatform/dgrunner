@@ -74,6 +74,17 @@ describe("Security Module", () => {
       expect(res.valid).toBe(false);
       expect(res.error).toContain("whitespace");
     });
+
+    it("rejects leading and trailing whitespace instead of validating a trimmed copy", () => {
+      expect(validateRegistrationToken(" AB12CD34EF56GH78IJ90").valid).toBe(false);
+      expect(validateRegistrationToken("AB12CD34EF56GH78IJ90 ").valid).toBe(false);
+      expect(validateRegistrationToken("AB12CD34EF56GH78IJ90\n").valid).toBe(false);
+      expect(validateRegistrationToken("AB12CD34EF56GH78IJ90\0").valid).toBe(false);
+    });
+
+    it("rejects oversized tokens before they reach a child process", () => {
+      expect(validateRegistrationToken("x".repeat(4097)).valid).toBe(false);
+    });
   });
 
   describe("maskToken", () => {

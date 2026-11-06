@@ -164,15 +164,42 @@ export function validateRegistrationToken(token: string): { valid: boolean; erro
     return { valid: false, error: "Registration token is required." };
   }
 
-  const trimmed = token.trim();
-  if (trimmed.length < 15) {
+  if (token.length < 15) {
     return { valid: false, error: "Token appears too short to be a valid GitHub registration token." };
+  }
+  if (token.length > 4096) {
+    return { valid: false, error: "Token is too long to be a valid GitHub runner token." };
   }
 
   // Tokens should not contain spaces or control characters
-  if (/[\s\r\n\t]/.test(trimmed)) {
+  if (/\s|[\u0000-\u001f\u007f]/.test(token)) {
     return { valid: false, error: "Token contains invalid whitespace characters." };
   }
 
+  return { valid: true };
+}
+
+export function validateRunnerName(name: string): { valid: boolean; error?: string } {
+  if (!name || !name.trim()) return { valid: false, error: "Runner name cannot be empty." };
+  if (name.length > 256) return { valid: false, error: "Runner name cannot exceed 256 characters." };
+  if (/[\u0000-\u001f\u007f]/.test(name)) {
+    return { valid: false, error: "Runner name cannot contain control characters." };
+  }
+  return { valid: true };
+}
+
+export function normalizeRunnerLabels(labels: string[]): string[] {
+  return [...new Set(labels.map((label) => label.trim()).filter(Boolean))];
+}
+
+export function validateRunnerLabels(labels: string[]): { valid: boolean; error?: string } {
+  if (labels.length === 0) return { valid: false, error: "At least one runner label is required." };
+  if (labels.length > 100) return { valid: false, error: "A runner can have at most 100 labels." };
+  if (labels.some((label) => label.length > 255 || /[\u0000-\u001f\u007f,]/.test(label))) {
+    return {
+      valid: false,
+      error: "Runner labels must be at most 255 characters and cannot contain control characters or commas.",
+    };
+  }
   return { valid: true };
 }

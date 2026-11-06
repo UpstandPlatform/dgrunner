@@ -10,7 +10,7 @@ export function registerRemoveCommand(program: Command): void {
   program
     .command("remove")
     .description("Unregister and remove the GitHub Actions runner from GitHub")
-    .option("-t, --token <token>", "GitHub runner removal token")
+    .option("-t, --token <token>", "GitHub runner removal token (may be exposed in shell history and process listings)")
     .option("-d, --dir <path>", "Runner directory", DEFAULT_RUNNER_DIR)
     .option("--runner <name>", "Configured runner name or Docker container name")
     .option("-y, --yes", "Skip interactive confirmation", false)
