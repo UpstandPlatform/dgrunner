@@ -2,8 +2,8 @@ import path from "node:path";
 import os from "node:os";
 
 export const APP_NAME = "dgrunner";
-export const APP_VERSION = "2.1.6";
-export const APP_DESCRIPTION = "Secure self-hosted GitHub Actions runner CLI with Docker";
+export const APP_VERSION = "2.2.0";
+export const APP_DESCRIPTION = "Secure self-hosted GitHub Actions runner CLI with Docker and disposable Hyper-V VMs";
 export const NPM_PACKAGE_NAME = "@upstand/dgrunner";
 export const NPM_REGISTRY_URL = "https://registry.npmjs.org/@upstand/dgrunner";
 

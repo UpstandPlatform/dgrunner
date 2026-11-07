@@ -7,6 +7,7 @@ import { registerServiceCommands } from "./commands/service.js";
 import { registerRemoveCommand } from "./commands/remove.js";
 import { registerGuideCommand } from "./commands/guide.js";
 import { registerUpgradeCommand } from "./commands/upgrade.js";
+import { registerSandboxCommand } from "./commands/sandbox.js";
 
 const program = new Command();
 
@@ -24,6 +25,7 @@ registerServiceCommands(program);
 registerRemoveCommand(program);
 registerGuideCommand(program);
 registerUpgradeCommand(program);
+registerSandboxCommand(program);
 
 // If called with no arguments, launch interactive setup wizard
 if (process.argv.length <= 2) {
