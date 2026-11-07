@@ -1,7 +1,7 @@
 {
   "name": "@upstand/dgrunner",
-  "version": "2.1.6",
-  "description": "Clean, minimal, and secure self-hosted GitHub Actions runner CLI with Docker integration",
+  "version": "2.2.0",
+  "description": "Secure self-hosted GitHub Actions runner CLI with Docker and disposable Hyper-V Linux VMs",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {

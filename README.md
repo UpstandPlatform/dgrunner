@@ -1,6 +1,6 @@
 # dgrunner 🚀
 
-> **Set up and manage self-hosted GitHub Actions runners on Linux and Windows, in WSL or Docker—with security checks, lifecycle controls, and a verification workflow generator.**
+> **Set up and manage self-hosted GitHub Actions runners on Linux and Windows, in WSL, Docker, or disposable Hyper-V Linux VMs—with security checks, lifecycle controls, and a verification workflow generator.**
 
 [![skills.sh](https://skills.sh/b/UpstandPlatform/dgrunner)](https://skills.sh/UpstandPlatform/dgrunner)
 
@@ -22,6 +22,7 @@ Built with TypeScript and [Commander](https://www.npmjs.com/package/commander).
 - [CLI Command Reference](#-cli-command-reference)
   - [`dgrunner doctor`](#dgrunner-doctor)
   - [`dgrunner setup`](#dgrunner-setup)
+  - [`dgrunner sandbox run`](#dgrunner-sandbox-run)
   - [`dgrunner status`](#dgrunner-status)
   - [`dgrunner start` / `stop` / `restart`](#dgrunner-start--stop--restart)
   - [`dgrunner run` (Foreground Attached Mode)](#dgrunner-run-foreground-attached-mode)
@@ -97,9 +98,9 @@ GitHub advises against using self-hosted runners on public repositories because 
    - Short-lived runner tokens are entered via masked prompts and are not logged or persisted by dgrunner. Native configuration/removal pass tokens to the runner through its secret input environment variable rather than child command-line arguments. Docker configuration sends the token over stdin. Supplying a token with dgrunner's `--token` option can still expose it in shell history and the dgrunner process list; prefer the hidden prompt.
 6. **Filesystem Permission Hardening**
    - Directories and local metadata files are created with restricted POSIX permissions (`0700` / `0600`).
-7. **Runner Jobs Are Not Automatically Sandboxed**
+7. **Persistent Runner Jobs Are Not Automatically Sandboxed**
    - Native Windows and WSL jobs run with the runner account's permissions. WSL commonly exposes Windows drives through `/mnt` and supports launching Windows executables, so WSL alone does not make an untrusted job safe from the Windows account. `dgrunner doctor` warns about these execution modes.
-   - Use persistent self-hosted runners only for repositories and workflows you trust. For untrusted code, use a dedicated disposable VM per job. dgrunner does not yet create per-job Windows Sandbox or disposable WSL environments.
+   - Use persistent self-hosted runners only for repositories and workflows you trust. `dgrunner sandbox run` can instead start one disposable Hyper-V Linux VM per job. Docker runs inside that guest; the Windows Docker socket and host files are not mounted. The VM still shares the host's Hyper-V hypervisor and network, so use a dedicated host and an isolated, filtered guest network for untrusted workflows. This is not the same isolation or operational service as GitHub-hosted runners.
 
 ---
 
@@ -111,7 +112,8 @@ Before setting up a runner, ensure your system has:
 | :--- | :--- | :--- |
 | **Node.js** | `>= 22.14.0` | Node 22 LTS or Node 24 LTS recommended |
 | **Git** | `>= 2.25.0` | Required for checkout steps (Git for Windows on Windows) |
-| **Docker** | Engine / Desktop | Docker Desktop (Windows) or Rootless Docker (Linux) |
+| **Docker** | Engine / Desktop | Docker Desktop (Windows) or Rootless Docker (Linux) for regular runners; sandbox mode needs Docker Engine in the guest template |
+| **Hyper-V** | Windows Pro, Enterprise, or Education | Required only for `dgrunner sandbox run`; needs the Hyper-V PowerShell module and a prepared Linux VM template |
 | **Operating System** | Linux / Windows | Linux (`x64`, `arm64`) or Windows (`x64`) |
 
 ---
@@ -341,6 +343,51 @@ dgrunner setup \
 - `--docker-socket`: Explicitly mount `/var/run/docker.sock` into the container. Workflows can gain control over the Docker host through this socket.
 - `--force`: Bypass critical pre-flight failures at your own risk.
 - `--no-service`: Configure without immediately starting the runner. Windows mode is a background process, not an installed OS service.
+
+---
+
+### `dgrunner sandbox run`
+Runs a foreground supervisor that provisions a fresh, one-job Linux Hyper-V VM for a private GitHub repository. Each VM boots from the same Linux VHDX template through a disposable differencing disk. GitHub's just-in-time runner registration allows one job, then dgrunner discards the VM and provisions a clean one. Docker runs inside the guest VM, so the Windows Docker daemon is never shared.
+
+```powershell
+dgrunner sandbox run `
+  --url https://github.com/owner/private-repo `
+  --name dgrunner-release `
+  --template C:\dgrunner\ubuntu-runner.vhdx `
+  --switch dgrunner-nat `
+  --ssh-key C:\Users\you\.ssh\dgrunner-vm `
+  --ssh-user runner `
+  --runner-directory /home/runner/actions-runner `
+  --labels self-hosted,Linux,X64,dgrunner-vm,docker `
+  --memory-gib 8 `
+  --processors 4
+```
+
+Press **Ctrl+C** to stop the supervisor. The guest must be a prepared Ubuntu or other Linux x64 VM with:
+
+- The GitHub Actions Linux runner files extracted in `--runner-directory`, but never configured. Do not include a `.runner` file or saved runner credentials in the template.
+- Docker Engine installed and working for `--ssh-user` (`docker info` must succeed). The Docker group grants root-equivalent access inside that disposable guest.
+- OpenSSH server enabled and the matching public key authorized for `--ssh-user`. Regenerate the guest's SSH host keys on first boot so clones do not share one host identity. Protect the host's private key with a restrictive Windows ACL and make it available for non-interactive SSH. dgrunner sends the one-job configuration over SSH stdin rather than placing it in process arguments.
+- Hyper-V guest integration services enabled so the host can read the guest IPv4 address. The guest also needs outbound network access to GitHub and any package or container registries used by workflows.
+
+On Windows, enable Hyper-V and create the Linux template VM first. Keep the template powered off and unchanged while the supervisor is running. The host needs the Hyper-V PowerShell module, Hyper-V Administrators access (or an elevated shell), the OpenSSH Client (`ssh.exe`), and the `gh` CLI authenticated as a repository administrator with permission to create just-in-time runners. The supervisor only connects to a private IPv4 address reported by Hyper-V. It does not configure the VM network or firewall: use a dedicated, filtered network that blocks guest access to Windows host services and your LAN while allowing only required outbound traffic. An external switch can put job code directly on your LAN.
+
+Change the workflow's `runs-on` labels to include a unique label such as `dgrunner-vm`. Labels only route jobs; they are not an access control. Stop any persistent runner with matching labels so it cannot also accept release jobs. Use this mode for private repositories with appropriate workflow and secret protections. A malicious job can gain root inside its guest and can attack reachable network services; the Hyper-V host and its firmware still need security updates.
+
+**Options:**
+- `--url <url>`: Private GitHub repository URL.
+- `--name <prefix>`: Prefix for unique one-job GitHub runner names.
+- `--template <path>`: Absolute path to the bootable Linux `.vhd` or `.vhdx` template.
+- `--switch <name>`: Existing Hyper-V virtual switch for the guest network.
+- `--ssh-key <path>`: Absolute path to the host's private SSH key authorized in the template.
+- `--ssh-user <name>`: Linux guest account (default `runner`).
+- `--runner-directory <path>`: Guest runner installation path (default `/home/runner/actions-runner`).
+- `--labels <labels>`: Comma-separated runner labels (default `self-hosted,Linux,X64,dgrunner-vm`). Must include `self-hosted`, `Linux`, and `X64`.
+- `--memory-gib <number>`: VM startup memory, 2–128 GiB (default 8).
+- `--processors <number>`: VM virtual processors, 1–64 (default 4).
+- `--generation <1|2>`: Hyper-V VM generation (default 2).
+
+The VM lifecycle is managed by the foreground process. If Windows or dgrunner is forcibly terminated, check Hyper-V Manager for a leftover `dgrunner-job-*` VM and remove it after confirming no job is still running.
 
 #### Multiple Docker runners
 
